@@ -165,9 +165,31 @@ pub struct StreamOptions {
     pub include_obfuscation: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    System,
+    Developer,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl Role {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::System => "system",
+            Role::Developer => "developer",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub role: String,
+    pub role: Role,
     pub content: Content,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -247,7 +269,10 @@ pub struct AllowedTools {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDefinition {
     pub name: String,
-    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
     pub parameters: Value,
 }
 
@@ -290,7 +315,7 @@ pub struct ChatCompletionChoice {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionMessage {
-    pub role: String,
+    pub role: Role,
     pub content: Option<Content>,
     #[serde(default)]
     pub annotations: Vec<Value>,
@@ -340,7 +365,7 @@ pub struct ChatCompletionChunkChoice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionChunkDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
+    pub role: Option<Role>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     pub refusal: Option<String>,

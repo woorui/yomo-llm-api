@@ -25,7 +25,8 @@ impl<Ctx: Send + Sync> ServerToolRegistry for WeatherToolRegistry<Ctx> {
             r#type: "function".to_string(),
             function: FunctionDefinition {
                 name: "get_weather".to_string(),
-                description: "Get weather by city".to_string(),
+                description: Some("Get weather by city".to_string()),
+                strict: None,
                 parameters: json!({
                     "type": "object",
                     "properties": {

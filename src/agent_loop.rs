@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use log::debug;
 
-use crate::openai_types::{ChatCompletionRequest, Content, Message, ToolDefinition};
+use crate::openai_types::{ChatCompletionRequest, Content, Message, Role, ToolDefinition};
 use crate::provider::{
     ChatError, Provider, ToolCall as ProviderToolCall, UnifiedEvent, UnifiedResponse, Usage,
 };
@@ -485,7 +485,7 @@ where
         let content = serde_json::to_string(&result)
             .map_err(|err| ChatError::InvalidResponse(format!("invalid tool result: {err}")))?;
         messages.push(Message {
-            role: "tool".to_string(),
+            role: Role::Tool,
             content: Content::Text(content),
             tool_call_id: Some(tool_call_id),
             tool_calls: None,
@@ -513,7 +513,7 @@ fn build_assistant_tool_call_message(
         .collect();
 
     Message {
-        role: "assistant".to_string(),
+        role: Role::Assistant,
         content: Content::Text("Tool call".to_string()),
         tool_call_id: None,
         tool_calls: Some(tool_calls),

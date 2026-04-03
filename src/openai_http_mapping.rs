@@ -7,7 +7,7 @@ use std::pin::Pin;
 use crate::openai_types::{
     ChatCompletionChunk, ChatCompletionChunkChoice, ChatCompletionChunkDelta,
     ChatCompletionChunkToolCall, ChatCompletionChunkToolCallFunction, ChatCompletionRequest,
-    ChatCompletionResponse, Content as OpenAIContent, ContentPart, ErrorResponse,
+    ChatCompletionResponse, Content as OpenAIContent, ContentPart, ErrorResponse, Role,
     ToolCall as OpenAIToolCall, ToolCallFunction, ToolChoice, Usage,
 };
 use crate::provider::{ChatError, FinishReason, ToolCall, UnifiedEvent, UnifiedResponse};
@@ -33,7 +33,7 @@ pub fn map_openai_response(response: UnifiedResponse) -> ChatCompletionResponse 
         system_fingerprint: None,
         choices: vec![crate::openai_types::ChatCompletionChoice {
             message: crate::openai_types::ChatCompletionMessage {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content,
                 annotations: Vec::new(),
                 refusal: None,
@@ -57,15 +57,15 @@ pub fn validate_openai_request(request: &ChatCompletionRequest) -> Result<(), St
 
     for message in &request.messages {
         if !matches!(
-            message.role.as_str(),
-            "system" | "developer" | "user" | "assistant" | "tool"
+            message.role,
+            Role::System | Role::Developer | Role::User | Role::Assistant | Role::Tool
         ) {
-            return Err(format!("invalid role: {}", message.role));
+            return Err(format!("invalid role: {}", message.role.as_str()));
         }
         match &message.content {
             OpenAIContent::Text(text) => {
                 if text.trim().is_empty()
-                    && !(message.role == "assistant" && message.tool_calls.is_some())
+                    && !(message.role == Role::Assistant && message.tool_calls.is_some())
                 {
                     return Err("content is empty".to_string());
                 }
@@ -107,10 +107,10 @@ pub fn validate_openai_request(request: &ChatCompletionRequest) -> Result<(), St
                 }
             }
         }
-        if message.tool_calls.is_some() && message.role != "assistant" {
+        if message.tool_calls.is_some() && message.role != Role::Assistant {
             return Err("message tool_calls is not supported".to_string());
         }
-        if message.role == "tool" {
+        if message.role == Role::Tool {
             if message
                 .tool_call_id
                 .as_deref()
@@ -195,7 +195,7 @@ pub fn stream_openai_chunks(
                         response_id = id.clone();
                     }
                     let delta = ChatCompletionChunkDelta {
-                        role: if role_sent { None } else { Some("assistant".to_string()) },
+                        role: if role_sent { None } else { Some(Role::Assistant) },
                         content: Some(delta),
                         refusal: None,
                         tool_calls: None,
@@ -224,7 +224,7 @@ pub fn stream_openai_chunks(
                         current
                     });
                     let delta = ChatCompletionChunkDelta {
-                        role: if role_sent { None } else { Some("assistant".to_string()) },
+                        role: if role_sent { None } else { Some(Role::Assistant) },
                         content: None,
                         refusal: None,
                         tool_calls: Some(vec![ChatCompletionChunkToolCall {
@@ -261,7 +261,7 @@ pub fn stream_openai_chunks(
                         current
                     });
                     let delta = ChatCompletionChunkDelta {
-                        role: if role_sent { None } else { Some("assistant".to_string()) },
+                        role: if role_sent { None } else { Some(Role::Assistant) },
                         content: None,
                         refusal: None,
                         tool_calls: Some(vec![ChatCompletionChunkToolCall {
@@ -311,7 +311,7 @@ pub fn stream_openai_chunks(
                         let request_id = response_id.clone();
                         let model = model.clone();
                         let delta = ChatCompletionChunkDelta {
-                            role: if role_sent { None } else { Some("assistant".to_string()) },
+                            role: if role_sent { None } else { Some(Role::Assistant) },
                             content: None,
                             refusal: None,
                             tool_calls: None,
