@@ -1,0 +1,9 @@
+[[providers]]
+id = "azure"
+type = "openai"
+model = "gpt-5.4-mini"
+default = true
+
+[providers.params]
+api_key = "<YOUR_API_KEY>"
+base_url = "https://<YOUR_RESOURCE>.openai.azure.com/openai/v1"
