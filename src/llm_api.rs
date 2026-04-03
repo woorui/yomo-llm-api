@@ -1,15 +1,15 @@
 use anyhow::Context;
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use log::{error, info};
 use std::net::SocketAddr;
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::context::{RequestContext, TraceContext};
 use crate::agent_loop::{
     AgentLoopConfig, AgentLoopResult, ServerToolInvoker, ServerToolRegistry, ToolError,
     run_agent_loop,
@@ -27,18 +27,14 @@ pub struct AppState<Ctx> {
     pub registry: Arc<ProviderRegistry>,
     pub tool_registry: Arc<dyn ServerToolRegistry<Ctx = Ctx>>,
     pub tool_invoker: Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
+    pub request_context_builder: Arc<dyn RequestContext<Ctx = Ctx>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct ToolContext {
-    pub trace_id: String,
-    pub span_id: String,
-}
 
 pub struct EmptyToolRegistry;
 
 impl ServerToolRegistry for EmptyToolRegistry {
-    type Ctx = ToolContext;
+    type Ctx = TraceContext;
 
     fn list(&self, _ctx: &Self::Ctx) -> Vec<crate::openai_types::ToolDefinition> {
         Vec::new()
@@ -48,7 +44,7 @@ impl ServerToolRegistry for EmptyToolRegistry {
 pub struct EmptyToolInvoker;
 
 impl ServerToolInvoker for EmptyToolInvoker {
-    type Ctx = ToolContext;
+    type Ctx = TraceContext;
 
     fn invoke(
         &self,
@@ -65,7 +61,7 @@ impl ServerToolInvoker for EmptyToolInvoker {
 
 pub async fn run_http_server(
     addr: SocketAddr,
-    state: AppState<ToolContext>,
+    state: AppState<TraceContext>,
 ) -> Result<(), anyhow::Error> {
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completions))
@@ -91,11 +87,14 @@ pub fn build_provider_registry(config_path: &str) -> Result<ProviderRegistry, an
 }
 
 async fn handle_chat_completions(
-    State(state): State<AppState<ToolContext>>,
+    State(state): State<AppState<TraceContext>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    let ctx = state.request_context_builder.build_from_headers(&headers);
+
     info!("chat request received");
-    match handle_chat_completions_inner(state, body).await {
+    match handle_chat_completions_inner(state, ctx, body).await {
         Ok(response) => response,
         Err(err) => {
             error!("chat completion failed: {err}");
@@ -105,7 +104,8 @@ async fn handle_chat_completions(
 }
 
 async fn handle_chat_completions_inner(
-    state: AppState<ToolContext>,
+    state: AppState<TraceContext>,
+    ctx: TraceContext,
     body: Bytes,
 ) -> Result<Response, anyhow::Error> {
     let mut request: ChatCompletionRequest =
@@ -140,8 +140,7 @@ async fn handle_chat_completions_inner(
         ));
     }
 
-    let params = HashMap::new();
-    let provider = match state.registry.select(&request.model, &params) {
+    let provider = match state.registry.select(&request.model, &ctx) {
         Ok(entry) => Arc::clone(&entry.provider),
         Err(err) => {
             error!(
@@ -154,21 +153,6 @@ async fn handle_chat_completions_inner(
                 Some("invalid_request_error"),
             ));
         }
-    };
-
-    let ctx = ToolContext {
-        trace_id: request
-            .metadata
-            .as_ref()
-            .and_then(|meta| meta.get("trace_id"))
-            .cloned()
-            .unwrap_or_else(|| "".to_string()),
-        span_id: request
-            .metadata
-            .as_ref()
-            .and_then(|meta| meta.get("span_id"))
-            .cloned()
-            .unwrap_or_else(|| "".to_string()),
     };
 
     let model_for_log = request.model.clone();

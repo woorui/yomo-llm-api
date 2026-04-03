@@ -3,9 +3,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use llm_api::agent_loop::{ServerToolInvoker, ServerToolRegistry};
+use llm_api::context::{RequestContext, TraceContext, TraceContextBuilder};
 use llm_api::llm_api::{
-    AppState, EmptyToolInvoker, EmptyToolRegistry, ToolContext, build_provider_registry,
-    run_http_server,
+    AppState, EmptyToolInvoker, EmptyToolRegistry, build_provider_registry, run_http_server,
 };
 use llm_api::mock_get_weather::{WeatherToolInvoker, WeatherToolRegistry};
 
@@ -32,15 +32,15 @@ async fn main() {
     let (tool_registry, tool_invoker) = if enable_weather_tool {
         info!("weather tool enabled via ENABLE_MOCK_GET_WEATHER");
         (
-            Arc::new(WeatherToolRegistry::<ToolContext>::default())
-                as Arc<dyn ServerToolRegistry<Ctx = ToolContext>>,
-            Arc::new(WeatherToolInvoker::<ToolContext>::default())
-                as Arc<dyn ServerToolInvoker<Ctx = ToolContext>>,
+            Arc::new(WeatherToolRegistry::<TraceContext>::default())
+                as Arc<dyn ServerToolRegistry<Ctx = TraceContext>>,
+            Arc::new(WeatherToolInvoker::<TraceContext>::default())
+                as Arc<dyn ServerToolInvoker<Ctx = TraceContext>>,
         )
     } else {
         (
-            Arc::new(EmptyToolRegistry) as Arc<dyn ServerToolRegistry<Ctx = ToolContext>>,
-            Arc::new(EmptyToolInvoker) as Arc<dyn ServerToolInvoker<Ctx = ToolContext>>,
+            Arc::new(EmptyToolRegistry) as Arc<dyn ServerToolRegistry<Ctx = TraceContext>>,
+            Arc::new(EmptyToolInvoker) as Arc<dyn ServerToolInvoker<Ctx = TraceContext>>,
         )
     };
 
@@ -48,6 +48,8 @@ async fn main() {
         registry: Arc::new(registry),
         tool_registry,
         tool_invoker,
+        request_context_builder: Arc::new(TraceContextBuilder::default())
+            as Arc<dyn RequestContext<Ctx = TraceContext>>,
     };
 
     if let Err(err) = run_http_server(addr, state).await {

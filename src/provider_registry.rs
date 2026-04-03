@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::Config;
+use crate::context::TraceContext;
 use crate::error::ConfigError;
 use crate::provider::Provider;
 use crate::providers::openai::build_openai_provider;
@@ -26,7 +27,7 @@ pub trait SelectionStrategy: Send + Sync {
     fn select(
         &self,
         model: &str,
-        params: &HashMap<String, String>,
+        ctx: &TraceContext,
         registry: &ProviderRegistry,
     ) -> Result<String, anyhow::Error>;
 }
@@ -38,7 +39,7 @@ impl SelectionStrategy for ByModel {
     fn select(
         &self,
         model: &str,
-        _params: &HashMap<String, String>,
+        _ctx: &TraceContext,
         registry: &ProviderRegistry,
     ) -> Result<String, anyhow::Error> {
         if model.trim().is_empty() {
@@ -103,12 +104,8 @@ impl ProviderRegistry {
         }
     }
 
-    pub fn select(
-        &self,
-        model: &str,
-        params: &HashMap<String, String>,
-    ) -> Result<&ProviderEntry, anyhow::Error> {
-        let selected = self.strategy.select(model, params, self).ok();
+    pub fn select(&self, model: &str, ctx: &TraceContext) -> Result<&ProviderEntry, anyhow::Error> {
+        let selected = self.strategy.select(model, ctx, self).ok();
         let id = selected
             .as_ref()
             .and_then(|id| self.providers.get_key_value(id).map(|(key, _)| key))

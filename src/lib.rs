@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod context;
 pub mod config;
 pub mod error;
 pub mod llm_api;
