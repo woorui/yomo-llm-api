@@ -52,7 +52,6 @@ pub enum AgentLoopResult {
     NonStream(UnifiedResponse),
     Stream {
         events: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, ChatError>> + Send>>,
-        force_usage: bool,
     },
 }
 
@@ -387,7 +386,6 @@ where
         Box::pin(stream);
     Ok(AgentLoopResult::Stream {
         events: boxed_stream,
-        force_usage: true,
     })
 }
 

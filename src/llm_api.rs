@@ -108,9 +108,22 @@ async fn handle_chat_completions_inner(
     state: AppState<ToolContext>,
     body: Bytes,
 ) -> Result<Response, anyhow::Error> {
-    let request: ChatCompletionRequest =
+    let mut request: ChatCompletionRequest =
         serde_json::from_slice(&body).context("invalid json body")?;
     let stream = request.stream.unwrap_or(false);
+    if stream {
+        match &mut request.stream_options {
+            Some(options) => {
+                options.include_usage = true;
+            }
+            None => {
+                request.stream_options = Some(crate::openai_types::StreamOptions {
+                    include_usage: true,
+                    include_obfuscation: None,
+                });
+            }
+        }
+    }
     info!(
         "chat request parsed: model={}, stream={}",
         request.model, stream
@@ -159,11 +172,6 @@ async fn handle_chat_completions_inner(
     };
 
     let model_for_log = request.model.clone();
-    let include_usage_request = request
-        .stream_options
-        .as_ref()
-        .map(|options| options.include_usage)
-        .unwrap_or(false);
     let loop_result = run_agent_loop(
         provider,
         request,
@@ -184,12 +192,8 @@ async fn handle_chat_completions_inner(
                 .body(Body::from(payload))
                 .expect("build response"))
         }
-        Ok(AgentLoopResult::Stream {
-            events,
-            force_usage,
-        }) => {
-            let include_usage = stream && include_usage_request;
-            let sse = stream_openai_chunks(events, include_usage, force_usage);
+        Ok(AgentLoopResult::Stream { events }) => {
+            let sse = stream_openai_chunks(events);
             let body = Body::from_stream(sse);
             Ok(Response::builder()
                 .status(StatusCode::OK)

@@ -161,8 +161,6 @@ pub fn validate_openai_request(request: &ChatCompletionRequest) -> Result<(), St
 
 pub fn stream_openai_chunks(
     stream: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, ChatError>> + Send>>,
-    include_usage: bool,
-    force_usage: bool,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
     try_stream! {
         futures_util::pin_mut!(stream);
@@ -291,7 +289,7 @@ pub fn stream_openai_chunks(
                         usage: None,
                     });
                 }
-                UnifiedEvent::Usage { usage } if include_usage => {
+                UnifiedEvent::Usage { usage } => {
                     yield sse_chunk(ChatCompletionChunk {
                         id: response_id.clone(),
                         created: parse_created_at(&created_at),
@@ -303,7 +301,6 @@ pub fn stream_openai_chunks(
                         usage: Some(map_usage(&usage)),
                     });
                 }
-                UnifiedEvent::Usage { .. } => {}
                 UnifiedEvent::MessageStop { .. } => {}
                 UnifiedEvent::Completed { finish_reason, usage } => {
                     let model_for_log = model.clone();
@@ -318,11 +315,7 @@ pub fn stream_openai_chunks(
                         };
                         role_sent = true;
                         finish_sent = true;
-                        let usage = if include_usage || force_usage {
-                            usage.as_ref().map(map_usage)
-                        } else {
-                            None
-                        };
+                        let usage = usage.as_ref().map(map_usage);
                         yield sse_chunk(ChatCompletionChunk {
                             id: request_id,
                             created: parse_created_at(&created_at),
