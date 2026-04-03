@@ -1,4 +1,5 @@
 use axum::http::HeaderMap;
+use std::fmt;
 
 pub trait RequestContext: Send + Sync {
     type Ctx;
@@ -8,6 +9,12 @@ pub trait RequestContext: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct TraceContext {
     pub trace_id: String,
+}
+
+impl fmt::Display for TraceContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "trace_id={}", self.trace_id)
+    }
 }
 
 #[derive(Clone, Debug, Default)]

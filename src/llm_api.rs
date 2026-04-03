@@ -93,11 +93,11 @@ async fn handle_chat_completions(
 ) -> impl IntoResponse {
     let ctx = state.request_context_builder.build_from_headers(&headers);
 
-    info!("chat request received");
+    info!("chat request received {}", ctx);
     match handle_chat_completions_inner(state, ctx, body).await {
         Ok(response) => response,
         Err(err) => {
-            error!("chat completion failed: {err}");
+            error!("chat completion failed: {err} {}", ctx);
             openai_error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
         }
     }
@@ -125,13 +125,13 @@ async fn handle_chat_completions_inner(
         }
     }
     info!(
-        "chat request parsed: model={}, stream={}",
-        request.model, stream
+        "chat request parsed: model={}, stream={} {}",
+        request.model, stream, ctx
     );
     if let Err(message) = validate_openai_request(&request) {
         error!(
-            "chat request invalid: model={}, error={}",
-            request.model, message
+            "chat request invalid: model={}, error={} {}",
+            request.model, message, ctx
         );
         return Ok(openai_error_response(
             StatusCode::BAD_REQUEST,
@@ -144,8 +144,8 @@ async fn handle_chat_completions_inner(
         Ok(entry) => Arc::clone(&entry.provider),
         Err(err) => {
             error!(
-                "chat selection failed: model={}, error={}",
-                request.model, err
+                "chat selection failed: model={}, error={} {}",
+                request.model, err, ctx
             );
             return Ok(openai_error_response(
                 StatusCode::BAD_REQUEST,
@@ -156,6 +156,7 @@ async fn handle_chat_completions_inner(
     };
 
     let model_for_log = request.model.clone();
+    let ctx_for_log = ctx.clone();
     let loop_result = run_agent_loop(
         provider,
         request,
@@ -168,7 +169,7 @@ async fn handle_chat_completions_inner(
 
     match loop_result {
         Ok(AgentLoopResult::NonStream(response)) => {
-            info!("chat request success: model={}", response.model);
+            info!("chat request success: model={} {}", response.model, ctx_for_log);
             let mapped = map_openai_response(response);
             let payload = serde_json::to_vec(&mapped).context("serialize response")?;
             Ok(Response::builder()
@@ -177,7 +178,7 @@ async fn handle_chat_completions_inner(
                 .expect("build response"))
         }
         Ok(AgentLoopResult::Stream { events }) => {
-            let sse = stream_openai_chunks(events);
+            let sse = stream_openai_chunks(events, ctx_for_log.trace_id.clone());
             let body = Body::from_stream(sse);
             Ok(Response::builder()
                 .status(StatusCode::OK)
@@ -186,8 +187,8 @@ async fn handle_chat_completions_inner(
         }
         Err(err) => {
             error!(
-                "chat request failed: model={}, error={}",
-                model_for_log, err
+                "chat request failed: model={}, error={} {}",
+                model_for_log, err, ctx_for_log
             );
             Ok(map_chat_error(err))
         }

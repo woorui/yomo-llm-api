@@ -161,6 +161,7 @@ pub fn validate_openai_request(request: &ChatCompletionRequest) -> Result<(), St
 
 pub fn stream_openai_chunks(
     stream: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, ChatError>> + Send>>,
+    trace_id: String,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
     try_stream! {
         futures_util::pin_mut!(stream);
@@ -176,7 +177,7 @@ pub fn stream_openai_chunks(
             let event = match item {
                 Ok(event) => event,
                 Err(err) => {
-                    log::error!("chat stream item error: {err}");
+                    log::error!("chat stream item error: {err} trace_id={trace_id}");
                     break;
                 }
             };
@@ -333,19 +334,22 @@ pub fn stream_openai_chunks(
                         });
                     }
                     log::info!(
-                        "chat stream completed: model={}, finish_reason={:?}",
+                        "chat stream completed: model={}, finish_reason={:?} trace_id={trace_id}",
                         model_for_log, finish_reason
                     );
                 }
                 UnifiedEvent::Failed { code, message } => {
                     log::error!(
-                        "chat stream failed: model={}, code={}, message={}",
+                        "chat stream failed: model={}, code={}, message={} trace_id={trace_id}",
                         model, code, message
                     );
                     break;
                 }
                 UnifiedEvent::Cancelled { reason } => {
-                    log::error!("chat stream cancelled: model={}, reason={}", model, reason);
+                    log::error!(
+                        "chat stream cancelled: model={}, reason={} trace_id={trace_id}",
+                        model, reason
+                    );
                     break;
                 }
                 UnifiedEvent::OutputItemAdded { .. }

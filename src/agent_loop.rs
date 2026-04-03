@@ -75,7 +75,7 @@ pub async fn run_agent_loop<Ctx>(
     config: AgentLoopConfig,
 ) -> Result<AgentLoopResult, ChatError>
 where
-    Ctx: Send + Sync + 'static,
+    Ctx: fmt::Display + Send + Sync + 'static,
 {
     if request.stream.unwrap_or(false) {
         run_agent_loop_stream(provider, request, registry, invoker, ctx, config).await
@@ -93,7 +93,7 @@ async fn run_agent_loop_nonstream<Ctx>(
     config: AgentLoopConfig,
 ) -> Result<AgentLoopResult, ChatError>
 where
-    Ctx: Send + Sync + 'static,
+    Ctx: fmt::Display + Send + Sync + 'static,
 {
     let mut call_count = 0usize;
     let mut total_usage = Usage {
@@ -116,7 +116,7 @@ where
             .map_err(|err| ChatError::ProviderErr(err.to_string()))?;
         add_usage(&mut total_usage, &response.usage);
         call_count += 1;
-        debug!("llm chat(#{call_count}), usage={:?}", response.usage);
+        debug!("llm chat(#{call_count}), usage={:?} {}", response.usage, ctx);
 
         if call_count >= config.max_calls {
             response.usage = total_usage;
@@ -165,7 +165,7 @@ async fn run_agent_loop_stream<Ctx>(
     config: AgentLoopConfig,
 ) -> Result<AgentLoopResult, ChatError>
 where
-    Ctx: Send + Sync + 'static,
+    Ctx: fmt::Display + Send + Sync + 'static,
 {
     let stream = async_stream::try_stream! {
         let mut call_count = 0usize;
@@ -307,7 +307,7 @@ where
             call_count += 1;
             if let Some(current_usage) = &usage {
                 add_usage(&mut total_usage, current_usage);
-                debug!("llm chat(#{call_count}), usage={:?}", current_usage);
+                debug!("llm chat(#{call_count}), usage={:?} {}", current_usage, ctx);
             }
             if call_count >= config.max_calls {
                 if !tool_calls.is_empty() {
