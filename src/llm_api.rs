@@ -94,10 +94,11 @@ async fn handle_chat_completions(
     let ctx = state.request_context_builder.build_from_headers(&headers);
 
     info!("chat request received {}", ctx);
+    let ctx_for_error = ctx.clone();
     match handle_chat_completions_inner(state, ctx, body).await {
         Ok(response) => response,
         Err(err) => {
-            error!("chat completion failed: {err} {}", ctx);
+            error!("chat completion failed: {err} {}", ctx_for_error);
             openai_error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
         }
     }

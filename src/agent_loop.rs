@@ -4,7 +4,7 @@ use std::fmt;
 use std::pin::Pin;
 
 use futures_core::Stream;
-use futures_util::StreamExt;
+use futures_util::{future::join_all, StreamExt};
 use serde_json::Value;
 use log::debug;
 
@@ -77,6 +77,7 @@ pub async fn run_agent_loop<Ctx>(
 where
     Ctx: fmt::Display + Send + Sync + 'static,
 {
+    let ctx = std::sync::Arc::new(ctx);
     if request.stream.unwrap_or(false) {
         run_agent_loop_stream(provider, request, registry, invoker, ctx, config).await
     } else {
@@ -89,7 +90,7 @@ async fn run_agent_loop_nonstream<Ctx>(
     mut request: ChatCompletionRequest,
     registry: std::sync::Arc<dyn ServerToolRegistry<Ctx = Ctx>>,
     invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
-    ctx: Ctx,
+    ctx: std::sync::Arc<Ctx>,
     config: AgentLoopConfig,
 ) -> Result<AgentLoopResult, ChatError>
 where
@@ -104,7 +105,7 @@ where
         reasoning_tokens: None,
     };
     loop {
-        let tool_maps = build_tool_maps(&request, registry.as_ref(), &ctx);
+        let tool_maps = build_tool_maps(&request, registry.as_ref(), ctx.as_ref());
         request.tools = tool_maps.merged_tools.clone();
         if call_count > 0 {
             request.tool_choice = None;
@@ -116,7 +117,7 @@ where
             .map_err(|err| ChatError::ProviderErr(err.to_string()))?;
         add_usage(&mut total_usage, &response.usage);
         call_count += 1;
-        debug!("llm chat(#{call_count}), usage={:?} {}", response.usage, ctx);
+        debug!("llm chat(#{call_count}), usage={:?} {}", response.usage, ctx.as_ref());
 
         if call_count >= config.max_calls {
             response.usage = total_usage;
@@ -149,9 +150,10 @@ where
         next_messages.extend(build_tool_messages::<Ctx>(
             &request_id,
             &server_calls,
-            invoker.as_ref(),
-            &ctx,
-        )?);
+            invoker.clone(),
+            ctx.clone(),
+        )
+        .await?);
         request.messages.extend(next_messages);
     }
 }
@@ -161,7 +163,7 @@ async fn run_agent_loop_stream<Ctx>(
     mut request: ChatCompletionRequest,
     registry: std::sync::Arc<dyn ServerToolRegistry<Ctx = Ctx>>,
     invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
-    ctx: Ctx,
+    ctx: std::sync::Arc<Ctx>,
     config: AgentLoopConfig,
 ) -> Result<AgentLoopResult, ChatError>
 where
@@ -177,7 +179,7 @@ where
             reasoning_tokens: None,
         };
         loop {
-            let tool_maps = build_tool_maps(&request, registry.as_ref(), &ctx);
+            let tool_maps = build_tool_maps(&request, registry.as_ref(), ctx.as_ref());
             request.tools = tool_maps.merged_tools.clone();
             if call_count > 0 {
                 request.tool_choice = None;
@@ -307,7 +309,7 @@ where
             call_count += 1;
             if let Some(current_usage) = &usage {
                 add_usage(&mut total_usage, current_usage);
-                debug!("llm chat(#{call_count}), usage={:?} {}", current_usage, ctx);
+                debug!("llm chat(#{call_count}), usage={:?} {}", current_usage, ctx.as_ref());
             }
             if call_count >= config.max_calls {
                 if !tool_calls.is_empty() {
@@ -375,9 +377,10 @@ where
             tool_messages.extend(build_tool_messages::<Ctx>(
                 &request_id,
                 &server_calls,
-                invoker.as_ref(),
-                &ctx,
-            )?);
+                invoker.clone(),
+                ctx.clone(),
+            )
+            .await?);
             request.messages.extend(tool_messages);
         }
     };
@@ -460,34 +463,47 @@ fn ensure_provider_call_ids(request_id: &str, calls: &mut [ProviderToolCall]) {
     }
 }
 
-fn build_tool_messages<Ctx>(
+async fn build_tool_messages<Ctx>(
     request_id: &str,
     calls: &[ProviderToolCall],
-    invoker: &dyn ServerToolInvoker<Ctx = Ctx>,
-    ctx: &Ctx,
+    invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
+    ctx: std::sync::Arc<Ctx>,
 ) -> Result<Vec<Message>, ChatError>
 where
     Ctx: Send + Sync + 'static,
 {
-    let mut messages = Vec::new();
-    for (index, call) in calls.iter().enumerate() {
-        let tool_call_id = call
-            .id
-            .clone()
-            .unwrap_or_else(|| ensure_tool_call_id(request_id, index));
-        let args: Value = serde_json::from_str(&call.arguments)
-            .map_err(|err| ChatError::InvalidRequest(format!("invalid tool arguments: {err}")))?;
-        let result = invoker
-            .invoke(ctx, &call.name, args)
-            .map_err(|err| ChatError::ProviderErr(err.to_string()))?;
-        let content = serde_json::to_string(&result)
-            .map_err(|err| ChatError::InvalidResponse(format!("invalid tool result: {err}")))?;
-        messages.push(Message {
-            role: Role::Tool,
-            content: Content::Text(content),
-            tool_call_id: Some(tool_call_id),
-            tool_calls: None,
-        });
+    let request_id = request_id.to_string();
+    let tasks = calls.iter().cloned().enumerate().map(|(index, call)| {
+        let invoker = invoker.clone();
+        let ctx = ctx.clone();
+        let request_id = request_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let tool_call_id = call
+                .id
+                .clone()
+                .unwrap_or_else(|| ensure_tool_call_id(&request_id, index));
+            let args: Value = serde_json::from_str(&call.arguments)
+                .map_err(|err| ChatError::InvalidRequest(format!("invalid tool arguments: {err}")))?;
+            let result = invoker
+                .invoke(ctx.as_ref(), &call.name, args)
+                .map_err(|err| ChatError::ProviderErr(err.to_string()))?;
+            let content = serde_json::to_string(&result)
+                .map_err(|err| ChatError::InvalidResponse(format!("invalid tool result: {err}")))?;
+            Ok(Message {
+                role: Role::Tool,
+                content: Content::Text(content),
+                tool_call_id: Some(tool_call_id),
+                tool_calls: None,
+            })
+        })
+    });
+
+    let results = join_all(tasks).await;
+    let mut messages = Vec::with_capacity(results.len());
+    for result in results {
+        let message = result
+            .map_err(|err| ChatError::ProviderErr(format!("tool task join error: {err}")))??;
+        messages.push(message);
     }
     Ok(messages)
 }

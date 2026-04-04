@@ -25,14 +25,10 @@ If Cursor/Copilot rules exist, they should be followed, but none were found in
 
 ### Tests
 - `cargo test` (all unit + integration tests)
-- `cargo test --test openai_chat` (integration test harness)
 - `cargo test trimmed_base_url` (single unit test by name)
 
 ### Run a Single Integration Test Case
-The integration test uses `libtest-mimic` and exposes cases as
-`openai_chat::<case-name>`.
-- `cargo test --test openai_chat -- openai_chat::basic` (example)
-- `cargo test --test openai_chat -- openai_chat::` (filter by prefix)
+There is no fixture-driven integration harness in this repo snapshot.
 
 ### Notes
 - Test fixtures live under `tests/fixtures/openai-chat-cases/`.
@@ -46,7 +42,7 @@ The integration test uses `libtest-mimic` and exposes cases as
 ### Project Structure
 - Library modules are under `src/` and re-exported in `src/lib.rs`.
 - The HTTP server binary is `src/bin/http_server.rs`.
-- Integration tests use `libtest-mimic` in `tests/openai_chat.rs`.
+- Integration tests using `libtest-mimic` are not present in this repo snapshot.
 - Tool merge and manual testing guidance lives in `docs/tool_merge_and_testing.md`.
 
 ### Formatting
@@ -105,10 +101,7 @@ The integration test uses `libtest-mimic` and exposes cases as
 - Maintain consistent tool call IDs across streams and non-streams.
 
 ### Tests
-- Add new fixtures under `tests/fixtures/openai-chat-cases/<case>/`.
-- Each case should include `request.json` and `response.txt`.
-- Stream cases are represented as SSE `data:` lines in `response.txt`.
-- Update fixtures when response format changes (usage/tool fields).
+- Test fixtures are not present in this repo snapshot.
 
 ### Config / Secrets
 - `config.toml` can include provider API keys; do not commit real secrets.
