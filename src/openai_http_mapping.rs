@@ -377,9 +377,10 @@ pub fn stream_openai_chunks(
                             usage,
                         });
                     }
+                    let finish_reason_log = finish_reason.as_deref().unwrap_or("");
                     info!(
-                        "chat stream completed: model={}, finish_reason={:?} trace_id={trace_id}",
-                        model_for_log, finish_reason
+                        "chat stream completed: model={}, finish_reason={} trace_id={trace_id}",
+                        model_for_log, finish_reason_log
                     );
                 }
                 UnifiedEvent::Failed { code, message } => {
