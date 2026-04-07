@@ -1,13 +1,19 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use anyhow::Context;
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use log::{error, info};
-use std::net::SocketAddr;
-use std::sync::Arc;
+use opentelemetry::global;
+use opentelemetry::propagation::Extractor;
+use opentelemetry::trace::TraceContextExt;
+use tracing::{Span, field, info_span, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::context::{RequestContext, TraceContext};
 use crate::agent_loop::{
@@ -28,6 +34,18 @@ pub struct AppState<Ctx> {
     pub tool_registry: Arc<dyn ServerToolRegistry<Ctx = Ctx>>,
     pub tool_invoker: Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
     pub request_context_builder: Arc<dyn RequestContext<Ctx = Ctx>>,
+}
+
+struct TraceHeaderExtractor<'a>(&'a HeaderMap);
+
+impl Extractor for TraceHeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|name| name.as_str()).collect()
+    }
 }
 
 
@@ -91,13 +109,35 @@ async fn handle_chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let ctx = state.request_context_builder.build_from_headers(&headers);
+    let mut ctx = state.request_context_builder.build_from_headers(&headers);
+    let parent_cx =
+        global::get_text_map_propagator(|prop| prop.extract(&TraceHeaderExtractor(&headers)));
+    let root_span = info_span!(
+        "http.request",
+        http.method = "POST",
+        http.route = "/v1/chat/completions",
+        http.status_code = field::Empty,
+        model = field::Empty,
+        streaming = field::Empty,
+    );
+    root_span.set_parent(parent_cx);
+    let otel_trace_id = root_span
+        .context()
+        .span()
+        .span_context()
+        .trace_id()
+        .to_string();
+    ctx.trace_id = otel_trace_id;
 
     info!("chat request received {}", ctx);
     let ctx_for_error = ctx.clone();
-    match handle_chat_completions_inner(state, ctx, body).await {
+    match handle_chat_completions_inner(state, ctx, body, root_span.clone())
+        .instrument(root_span.clone())
+        .await
+    {
         Ok(response) => response,
         Err(err) => {
+            root_span.record("http.status_code", StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64);
             error!("chat completion failed: {err} {}", ctx_for_error);
             openai_error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
         }
@@ -108,10 +148,13 @@ async fn handle_chat_completions_inner(
     state: AppState<TraceContext>,
     ctx: TraceContext,
     body: Bytes,
+    root_span: Span,
 ) -> Result<Response, anyhow::Error> {
     let mut request: ChatCompletionRequest =
         serde_json::from_slice(&body).context("invalid json body")?;
     let stream = request.stream.unwrap_or(false);
+    root_span.record("model", field::display(&request.model));
+    root_span.record("streaming", stream);
     if stream {
         match &mut request.stream_options {
             Some(options) => {
@@ -134,6 +177,7 @@ async fn handle_chat_completions_inner(
             "chat request invalid: model={}, error={} {}",
             request.model, message, ctx
         );
+        root_span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
         return Ok(openai_error_response(
             StatusCode::BAD_REQUEST,
             &message,
@@ -148,6 +192,7 @@ async fn handle_chat_completions_inner(
                 "chat selection failed: model={}, error={} {}",
                 request.model, err, ctx
             );
+            root_span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
             return Ok(openai_error_response(
                 StatusCode::BAD_REQUEST,
                 &err.to_string(),
@@ -157,6 +202,7 @@ async fn handle_chat_completions_inner(
     };
 
     let model_for_log = request.model.clone();
+    let request_model = request.model.clone();
     let ctx_for_log = ctx.clone();
     let loop_result = run_agent_loop(
         provider,
@@ -165,6 +211,7 @@ async fn handle_chat_completions_inner(
         Arc::clone(&state.tool_invoker),
         ctx,
         AgentLoopConfig::default(),
+        root_span.clone(),
     )
     .await;
 
@@ -173,13 +220,20 @@ async fn handle_chat_completions_inner(
             info!("chat request success: model={} {}", response.model, ctx_for_log);
             let mapped = map_openai_response(response);
             let payload = serde_json::to_vec(&mapped).context("serialize response")?;
+            root_span.record("http.status_code", StatusCode::OK.as_u16() as i64);
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .body(Body::from(payload))
                 .expect("build response"))
         }
         Ok(AgentLoopResult::Stream { events }) => {
-            let sse = stream_openai_chunks(events, ctx_for_log.trace_id.clone());
+            root_span.record("http.status_code", StatusCode::OK.as_u16() as i64);
+            let sse = stream_openai_chunks(
+                events,
+                ctx_for_log.trace_id.clone(),
+                request_model,
+                root_span.clone(),
+            );
             let body = Body::from_stream(sse);
             Ok(Response::builder()
                 .status(StatusCode::OK)
@@ -191,7 +245,9 @@ async fn handle_chat_completions_inner(
                 "chat request failed: model={}, error={} {}",
                 model_for_log, err, ctx_for_log
             );
-            Ok(map_chat_error(err))
+            let response = map_chat_error(err);
+            root_span.record("http.status_code", response.status().as_u16() as i64);
+            Ok(response)
         }
     }
 }

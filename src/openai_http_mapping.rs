@@ -1,8 +1,12 @@
+use std::pin::Pin;
+
 use async_stream::try_stream;
 use axum::body::Bytes;
+use axum::http::StatusCode;
 use futures_core::Stream;
 use futures_util::StreamExt;
-use std::pin::Pin;
+use log::{error, info};
+use tracing::{field, info_span, Span};
 
 use crate::openai_types::{
     ChatCompletionChunk, ChatCompletionChunkChoice, ChatCompletionChunkDelta,
@@ -162,22 +166,37 @@ pub fn validate_openai_request(request: &ChatCompletionRequest) -> Result<(), St
 pub fn stream_openai_chunks(
     stream: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, ChatError>> + Send>>,
     trace_id: String,
+    default_model: String,
+    root_span: Span,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
     try_stream! {
         futures_util::pin_mut!(stream);
         let mut role_sent = false;
         let mut finish_sent = false;
+        let mut response_span: Option<Span> = None;
         let mut response_id = String::new();
-        let mut model = String::new();
+        let mut model = default_model;
         let mut created_at = String::new();
         let mut tool_call_index: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
         let mut next_tool_index: i32 = 0;
+
+        let ensure_response_span = |response_span: &mut Option<Span>| {
+            if response_span.is_none() {
+                let span = info_span!(
+                    parent: &root_span,
+                    "response.write",
+                    http.status_code = StatusCode::OK.as_u16() as i64,
+                    finish_reason = field::Empty,
+                );
+                *response_span = Some(span);
+            }
+        };
 
         while let Some(item) = stream.next().await {
             let event = match item {
                 Ok(event) => event,
                 Err(err) => {
-                    log::error!("chat stream item error: {err} trace_id={trace_id}");
+                    error!("chat stream item error: {err} trace_id={trace_id}");
                     break;
                 }
             };
@@ -200,6 +219,7 @@ pub fn stream_openai_chunks(
                         tool_calls: None,
                     };
                     role_sent = true;
+                    ensure_response_span(&mut response_span);
                     yield sse_chunk(ChatCompletionChunk {
                         id: response_id.clone(),
                         created: parse_created_at(&created_at),
@@ -237,6 +257,7 @@ pub fn stream_openai_chunks(
                         }]),
                     };
                     role_sent = true;
+                    ensure_response_span(&mut response_span);
                     yield sse_chunk(ChatCompletionChunk {
                         id: response_id.clone(),
                         created: parse_created_at(&created_at),
@@ -274,6 +295,7 @@ pub fn stream_openai_chunks(
                         }]),
                     };
                     role_sent = true;
+                    ensure_response_span(&mut response_span);
                     yield sse_chunk(ChatCompletionChunk {
                         id: response_id.clone(),
                         created: parse_created_at(&created_at),
@@ -291,6 +313,7 @@ pub fn stream_openai_chunks(
                     });
                 }
                 UnifiedEvent::Usage { usage } => {
+                    ensure_response_span(&mut response_span);
                     yield sse_chunk(ChatCompletionChunk {
                         id: response_id.clone(),
                         created: parse_created_at(&created_at),
@@ -305,6 +328,9 @@ pub fn stream_openai_chunks(
                 UnifiedEvent::MessageStop { .. } => {}
                 UnifiedEvent::Completed { finish_reason, usage } => {
                     let model_for_log = model.clone();
+                    if let (Some(reason), Some(span)) = (finish_reason.as_deref(), response_span.as_ref()) {
+                        span.record("finish_reason", field::display(reason));
+                    }
                     if !finish_sent {
                         let request_id = response_id.clone();
                         let model = model.clone();
@@ -317,6 +343,7 @@ pub fn stream_openai_chunks(
                         role_sent = true;
                         finish_sent = true;
                         let usage = usage.as_ref().map(map_usage);
+                        ensure_response_span(&mut response_span);
                         yield sse_chunk(ChatCompletionChunk {
                             id: request_id,
                             created: parse_created_at(&created_at),
@@ -333,20 +360,20 @@ pub fn stream_openai_chunks(
                             usage,
                         });
                     }
-                    log::info!(
+                    info!(
                         "chat stream completed: model={}, finish_reason={:?} trace_id={trace_id}",
                         model_for_log, finish_reason
                     );
                 }
                 UnifiedEvent::Failed { code, message } => {
-                    log::error!(
+                    error!(
                         "chat stream failed: model={}, code={}, message={} trace_id={trace_id}",
                         model, code, message
                     );
                     break;
                 }
                 UnifiedEvent::Cancelled { reason } => {
-                    log::error!(
+                    error!(
                         "chat stream cancelled: model={}, reason={} trace_id={trace_id}",
                         model, reason
                     );

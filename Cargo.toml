@@ -11,6 +11,9 @@ chrono = "0.4"
 futures-core = "0.3"
 futures-util = "0.3"
 log = "0.4"
+opentelemetry = "0.22"
+opentelemetry-otlp = { version = "0.15", features = ["http-proto", "reqwest-client"] }
+opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -18,4 +21,6 @@ tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
 env_logger = "0.11"
 validator = "0.20"
 config = "0.15"
-
+tracing = "0.1"
+tracing-opentelemetry = "0.23"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

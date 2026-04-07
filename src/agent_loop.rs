@@ -5,8 +5,13 @@ use std::pin::Pin;
 
 use futures_core::Stream;
 use futures_util::{future::join_all, StreamExt};
-use serde_json::Value;
 use log::debug;
+use opentelemetry::global;
+use opentelemetry::trace::{Span as OtelSpan, Status, Tracer};
+use opentelemetry::KeyValue;
+use serde_json::Value;
+use tracing::{Span, field, info_span, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::openai_types::{ChatCompletionRequest, Content, Message, Role, ToolDefinition};
 use crate::provider::{
@@ -73,15 +78,16 @@ pub async fn run_agent_loop<Ctx>(
     invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
     ctx: Ctx,
     config: AgentLoopConfig,
+    root_span: Span,
 ) -> Result<AgentLoopResult, ChatError>
 where
     Ctx: fmt::Display + Send + Sync + 'static,
 {
     let ctx = std::sync::Arc::new(ctx);
     if request.stream.unwrap_or(false) {
-        run_agent_loop_stream(provider, request, registry, invoker, ctx, config).await
+        run_agent_loop_stream(provider, request, registry, invoker, ctx, config, root_span).await
     } else {
-        run_agent_loop_nonstream(provider, request, registry, invoker, ctx, config).await
+        run_agent_loop_nonstream(provider, request, registry, invoker, ctx, config, root_span).await
     }
 }
 
@@ -92,6 +98,7 @@ async fn run_agent_loop_nonstream<Ctx>(
     invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
     ctx: std::sync::Arc<Ctx>,
     config: AgentLoopConfig,
+    root_span: Span,
 ) -> Result<AgentLoopResult, ChatError>
 where
     Ctx: fmt::Display + Send + Sync + 'static,
@@ -111,13 +118,27 @@ where
             request.tool_choice = None;
         }
 
+        let llm_span = info_span!(
+            parent: &root_span,
+            "llm.chat",
+            round = (call_count + 1) as i64,
+            model = %request.model,
+            streaming = false,
+            usage_input_tokens = field::Empty,
+            usage_output_tokens = field::Empty,
+            usage_total_tokens = field::Empty,
+            usage_cached_tokens = field::Empty,
+            usage_reasoning_tokens = field::Empty,
+        );
         let mut response = provider
             .complete(request.clone())
             .await
             .map_err(|err| ChatError::ProviderErr(err.to_string()))?;
+        record_usage(&llm_span, &response.usage);
         add_usage(&mut total_usage, &response.usage);
         call_count += 1;
         debug!("llm chat(#{call_count}), usage={:?} {}", response.usage, ctx.as_ref());
+        drop(llm_span);
 
         if call_count >= config.max_calls {
             response.usage = total_usage;
@@ -145,15 +166,23 @@ where
         }
 
         let request_id = response.request_id.clone();
-        let mut next_messages = Vec::new();
-        next_messages.push(build_assistant_tool_call_message(&request_id, &server_calls));
-        next_messages.extend(build_tool_messages::<Ctx>(
-            &request_id,
-            &server_calls,
-            invoker.clone(),
-            ctx.clone(),
-        )
-        .await?);
+        let tool_group_span = info_span!(
+            parent: &root_span,
+            "tool.calls",
+            round = call_count as i64,
+            tool_count = server_calls.len() as i64,
+        );
+        let next_messages = async {
+            let mut next_messages = Vec::new();
+            next_messages.push(build_assistant_tool_call_message(&request_id, &server_calls));
+            next_messages.extend(
+                build_tool_messages::<Ctx>(&request_id, &server_calls, invoker.clone(), ctx.clone())
+                    .await?,
+            );
+            Ok::<Vec<Message>, ChatError>(next_messages)
+        }
+        .instrument(tool_group_span)
+        .await?;
         request.messages.extend(next_messages);
     }
 }
@@ -165,6 +194,7 @@ async fn run_agent_loop_stream<Ctx>(
     invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
     ctx: std::sync::Arc<Ctx>,
     config: AgentLoopConfig,
+    root_span: Span,
 ) -> Result<AgentLoopResult, ChatError>
 where
     Ctx: fmt::Display + Send + Sync + 'static,
@@ -185,6 +215,18 @@ where
                 request.tool_choice = None;
             }
 
+            let llm_span = info_span!(
+                parent: &root_span,
+                "llm.chat",
+                round = (call_count + 1) as i64,
+                model = %request.model,
+                streaming = true,
+                usage_input_tokens = field::Empty,
+                usage_output_tokens = field::Empty,
+                usage_total_tokens = field::Empty,
+                usage_cached_tokens = field::Empty,
+                usage_reasoning_tokens = field::Empty,
+            );
             let mut provider_stream = provider.stream(request.clone());
 
             let usage_offset = total_usage.clone();
@@ -308,9 +350,11 @@ where
 
             call_count += 1;
             if let Some(current_usage) = &usage {
+                record_usage(&llm_span, current_usage);
                 add_usage(&mut total_usage, current_usage);
                 debug!("llm chat(#{call_count}), usage={:?} {}", current_usage, ctx.as_ref());
             }
+            drop(llm_span);
             if call_count >= config.max_calls {
                 if !tool_calls.is_empty() {
                     if !emitted_client_tool {
@@ -372,15 +416,23 @@ where
             }
 
             let request_id = request.model.clone();
-            let mut tool_messages = Vec::new();
-            tool_messages.push(build_assistant_tool_call_message(&request_id, &server_calls));
-            tool_messages.extend(build_tool_messages::<Ctx>(
-                &request_id,
-                &server_calls,
-                invoker.clone(),
-                ctx.clone(),
-            )
-            .await?);
+            let tool_group_span = info_span!(
+                parent: &root_span,
+                "tool.calls",
+                round = call_count as i64,
+                tool_count = server_calls.len() as i64,
+            );
+            let tool_messages = async {
+                let mut tool_messages = Vec::new();
+                tool_messages.push(build_assistant_tool_call_message(&request_id, &server_calls));
+                tool_messages.extend(
+                    build_tool_messages::<Ctx>(&request_id, &server_calls, invoker.clone(), ctx.clone())
+                        .await?,
+                );
+                Ok::<Vec<Message>, ChatError>(tool_messages)
+            }
+            .instrument(tool_group_span)
+            .await?;
             request.messages.extend(tool_messages);
         }
     };
@@ -473,22 +525,58 @@ where
     Ctx: Send + Sync + 'static,
 {
     let request_id = request_id.to_string();
+    let parent_span = Span::current();
+    let parent_cx = parent_span.context();
     let tasks = calls.iter().cloned().enumerate().map(|(index, call)| {
         let invoker = invoker.clone();
         let ctx = ctx.clone();
         let request_id = request_id.clone();
+        let parent_span = parent_span.clone();
+        let parent_cx = parent_cx.clone();
         tokio::task::spawn_blocking(move || {
+            let _enter = parent_span.enter();
+            let tracer = global::tracer("llm_api");
+            let tool_name = call.name.clone();
+            let mut span = tracer.start_with_context(tool_name.clone(), &parent_cx);
+            span.set_attribute(KeyValue::new("tool_name", tool_name));
+            span.set_attribute(KeyValue::new("arguments", call.arguments.clone()));
             let tool_call_id = call
                 .id
                 .clone()
                 .unwrap_or_else(|| ensure_tool_call_id(&request_id, index));
+            span.set_attribute(KeyValue::new(
+                "args_size",
+                call.arguments.as_bytes().len() as i64,
+            ));
             let args: Value = serde_json::from_str(&call.arguments)
-                .map_err(|err| ChatError::InvalidRequest(format!("invalid tool arguments: {err}")))?;
+                .map_err(|err| {
+                    span.set_attribute(KeyValue::new("status", "error"));
+                    span.set_attribute(KeyValue::new("error", err.to_string()));
+                    span.set_status(Status::error(err.to_string()));
+                    ChatError::InvalidRequest(format!("invalid tool arguments: {err}"))
+                })?;
             let result = invoker
                 .invoke(ctx.as_ref(), &call.name, args)
-                .map_err(|err| ChatError::ProviderErr(err.to_string()))?;
+                .map_err(|err| {
+                    span.set_attribute(KeyValue::new("status", "error"));
+                    span.set_attribute(KeyValue::new("error", err.to_string()));
+                    span.set_status(Status::error(err.to_string()));
+                    ChatError::ProviderErr(err.to_string())
+                })?;
             let content = serde_json::to_string(&result)
-                .map_err(|err| ChatError::InvalidResponse(format!("invalid tool result: {err}")))?;
+                .map_err(|err| {
+                    span.set_attribute(KeyValue::new("status", "error"));
+                    span.set_attribute(KeyValue::new("error", err.to_string()));
+                    span.set_status(Status::error(err.to_string()));
+                    ChatError::InvalidResponse(format!("invalid tool result: {err}"))
+                })?;
+            span.set_attribute(KeyValue::new(
+                "result_size",
+                content.as_bytes().len() as i64,
+            ));
+            span.set_attribute(KeyValue::new("result", content.clone()));
+            span.set_attribute(KeyValue::new("status", "ok"));
+            span.end();
             Ok(Message {
                 role: Role::Tool,
                 content: Content::Text(content),
@@ -603,4 +691,16 @@ fn add_usage_cloned(total: &Usage, delta: &Usage) -> Usage {
     let mut usage = total.clone();
     add_usage(&mut usage, delta);
     usage
+}
+
+fn record_usage(span: &Span, usage: &Usage) {
+    span.record("usage_input_tokens", usage.input_tokens as i64);
+    span.record("usage_output_tokens", usage.output_tokens as i64);
+    span.record("usage_total_tokens", usage.total_tokens as i64);
+    if let Some(cached) = usage.cached_tokens {
+        span.record("usage_cached_tokens", cached as i64);
+    }
+    if let Some(reasoning) = usage.reasoning_tokens {
+        span.record("usage_reasoning_tokens", reasoning as i64);
+    }
 }

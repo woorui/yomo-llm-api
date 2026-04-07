@@ -1,6 +1,17 @@
-use log::{error, info};
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+use anyhow::Context;
+use log::{error, info};
+use opentelemetry::global;
+use opentelemetry::KeyValue;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{Resource, trace as sdktrace};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::runtime::Tokio;
+use tracing::subscriber::set_global_default;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::EnvFilter;
 
 use llm_api::agent_loop::{ServerToolInvoker, ServerToolRegistry};
 use llm_api::context::{RequestContext, TraceContext, TraceContextBuilder};
@@ -12,6 +23,9 @@ use llm_api::mock_get_weather::{WeatherToolInvoker, WeatherToolRegistry};
 #[tokio::main]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    if let Err(err) = init_tracing() {
+        error!("otel tracing init failed: {err}");
+    }
     let config_path = "config.toml".to_string();
     let port = "8000".to_string();
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().expect("invalid PORT");
@@ -55,4 +69,35 @@ async fn main() {
     if let Err(err) = run_http_server(addr, state).await {
         error!("{err}");
     }
+}
+
+fn init_tracing() -> Result<(), anyhow::Error> {
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4318".to_string());
+    let service_name =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "llm_api".to_string());
+    global::set_text_map_propagator(TraceContextPropagator::new());
+    let exporter = opentelemetry_otlp::new_exporter().http().with_endpoint(endpoint);
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(exporter)
+        .with_trace_config(
+            sdktrace::config().with_resource(Resource::new(vec![KeyValue::new(
+                "service.name",
+                service_name,
+            )])),
+        )
+        .install_batch(Tokio)
+        .context("init otlp tracing")?;
+    let otel_layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_location(false)
+        .with_threads(false);
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with(otel_layer);
+    set_global_default(subscriber).context("set tracing subscriber")?;
+    Ok(())
 }
