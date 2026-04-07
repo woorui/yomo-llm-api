@@ -237,11 +237,13 @@ fn map_tool_call_delta(
 }
 
 fn chunk_metadata(chunk: &ChatCompletionChunk) -> (String, String, String) {
-    let created_at = chunk
-        .created
-        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| "".to_string());
+    let created_at = if let Some(ts) = chunk.created.filter(|ts| *ts > 0) {
+        chrono::DateTime::from_timestamp(ts, 0)
+            .unwrap_or_else(|| chrono::Utc::now())
+            .to_rfc3339()
+    } else {
+        chrono::Utc::now().to_rfc3339()
+    };
     (chunk.id.clone(), chunk.model.clone(), created_at)
 }
 

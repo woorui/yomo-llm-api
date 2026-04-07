@@ -174,6 +174,7 @@ pub fn stream_openai_chunks(
         let mut role_sent = false;
         let mut finish_sent = false;
         let mut response_span: Option<Span> = None;
+        let mut sent_preamble = false;
         let mut response_id = String::new();
         let mut model = default_model;
         let mut created_at = String::new();
@@ -207,6 +208,20 @@ pub fn stream_openai_chunks(
                         model = resp_model;
                     }
                     created_at = resp_created;
+                    if !sent_preamble {
+                        ensure_response_span(&mut response_span);
+                        sent_preamble = true;
+                        yield sse_chunk(ChatCompletionChunk {
+                            id: String::new(),
+                            created: Some(0),
+                            model: String::new(),
+                            object: "chat.completion.chunk".to_string(),
+                            system_fingerprint: None,
+                            obfuscation: None,
+                            choices: Vec::new(),
+                            usage: None,
+                        });
+                    }
                 }
                 UnifiedEvent::ResponseInProgress { .. } => {}
                 UnifiedEvent::MessageStart { .. } => {}
