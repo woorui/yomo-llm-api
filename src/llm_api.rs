@@ -9,8 +9,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use log::{error, info};
-use opentelemetry::global;
-use opentelemetry::propagation::Extractor;
 use opentelemetry::trace::TraceContextExt;
 use tracing::{Span, field, info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -34,18 +32,6 @@ pub struct AppState<Ctx> {
     pub tool_registry: Arc<dyn ServerToolRegistry<Ctx = Ctx>>,
     pub tool_invoker: Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
     pub request_context_builder: Arc<dyn RequestContext<Ctx = Ctx>>,
-}
-
-struct TraceHeaderExtractor<'a>(&'a HeaderMap);
-
-impl Extractor for TraceHeaderExtractor<'_> {
-    fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).and_then(|value| value.to_str().ok())
-    }
-
-    fn keys(&self) -> Vec<&str> {
-        self.0.keys().map(|name| name.as_str()).collect()
-    }
 }
 
 
@@ -110,8 +96,6 @@ async fn handle_chat_completions(
     body: Bytes,
 ) -> impl IntoResponse {
     let mut ctx = state.request_context_builder.build_from_headers(&headers);
-    let parent_cx =
-        global::get_text_map_propagator(|prop| prop.extract(&TraceHeaderExtractor(&headers)));
     let root_span = info_span!(
         "http.request",
         http.method = "POST",
@@ -120,7 +104,6 @@ async fn handle_chat_completions(
         model = field::Empty,
         streaming = field::Empty,
     );
-    root_span.set_parent(parent_cx);
     let otel_trace_id = root_span
         .context()
         .span()

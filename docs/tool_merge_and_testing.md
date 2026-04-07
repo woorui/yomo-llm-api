@@ -98,7 +98,7 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.4-mini",
-    "messages": [{"role": "user", "content": "Weather in Beijing"}],
+    "messages": [{"role": "user", "content": "Weather in Beijing And Shanghai"}],
     "tool_choice": "auto"
   }'
 ```

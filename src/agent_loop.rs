@@ -120,7 +120,7 @@ where
 
         let llm_span = info_span!(
             parent: &root_span,
-            "llm.chat",
+            "llm.call",
             round = (call_count + 1) as i64,
             model = %request.model,
             streaming = false,
@@ -217,7 +217,7 @@ where
 
             let llm_span = info_span!(
                 parent: &root_span,
-                "llm.chat",
+                "llm.call",
                 round = (call_count + 1) as i64,
                 model = %request.model,
                 streaming = true,

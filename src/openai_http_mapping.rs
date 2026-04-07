@@ -184,7 +184,7 @@ pub fn stream_openai_chunks(
             if response_span.is_none() {
                 let span = info_span!(
                     parent: &root_span,
-                    "response.write",
+                    "response.stream",
                     http.status_code = StatusCode::OK.as_u16() as i64,
                     finish_reason = field::Empty,
                 );
@@ -203,7 +203,9 @@ pub fn stream_openai_chunks(
             match event {
                 UnifiedEvent::ResponseCreated { id, model: resp_model, created_at: resp_created } => {
                     response_id = id;
-                    model = resp_model;
+                    if !resp_model.trim().is_empty() {
+                        model = resp_model;
+                    }
                     created_at = resp_created;
                 }
                 UnifiedEvent::ResponseInProgress { .. } => {}
