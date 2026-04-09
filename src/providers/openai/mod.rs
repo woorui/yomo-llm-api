@@ -7,7 +7,7 @@ use crate::error::ConfigError;
 use crate::openai_client;
 use crate::openai_http_mapping::validate_openai_request;
 use crate::openai_types::ChatCompletionRequest;
-use crate::provider::{ChatError, Provider, UnifiedEvent, UnifiedResponse};
+use crate::provider::{AgentError, Provider, UnifiedEvent, UnifiedResponse};
 
 pub mod mapper;
 
@@ -34,7 +34,7 @@ impl Provider for OpenAIProvider {
     fn complete<'a>(
         &'a self,
         request: ChatCompletionRequest,
-    ) -> Pin<Box<dyn futures_core::Future<Output = Result<UnifiedResponse, ChatError>> + Send + 'a>>
+    ) -> Pin<Box<dyn futures_core::Future<Output = Result<UnifiedResponse, AgentError>> + Send + 'a>>
     {
         Box::pin(async move {
             validate_request(&request)?;
@@ -43,7 +43,7 @@ impl Provider for OpenAIProvider {
                 .client
                 .chat_completions(request)
                 .await
-                .map_err(|err| ChatError::ProviderErr(err.to_string()))?;
+                .map_err(|err| AgentError::ProviderErr(err.to_string()))?;
 
             mapper::map_response(response)
         })
@@ -52,7 +52,7 @@ impl Provider for OpenAIProvider {
     fn stream<'a>(
         &'a self,
         request: ChatCompletionRequest,
-    ) -> Pin<Box<dyn Stream<Item = Result<UnifiedEvent, ChatError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<UnifiedEvent, AgentError>> + Send + 'a>> {
         Box::pin(try_stream! {
             validate_request(&request)?;
             ensure_model_matches(&self.model, &request.model)?;
@@ -60,12 +60,12 @@ impl Provider for OpenAIProvider {
                 .client
                 .chat_completions_stream(request)
                 .await
-                .map_err(|err| ChatError::ProviderErr(err.to_string()))?;
+                .map_err(|err| AgentError::ProviderErr(err.to_string()))?;
             futures_util::pin_mut!(stream);
             let mut state = mapper::StreamMapState::default();
 
             while let Some(item) = stream.next().await {
-                let chunk = item.map_err(|err| ChatError::ProviderErr(err.to_string()))?;
+                let chunk = item.map_err(|err| AgentError::ProviderErr(err.to_string()))?;
                 for event in mapper::map_stream_chunk(chunk, &mut state) {
                     yield event;
                 }
@@ -90,14 +90,14 @@ pub fn build_openai_provider(
     Ok(OpenAIProvider::new(client, model))
 }
 
-fn validate_request(request: &ChatCompletionRequest) -> Result<(), ChatError> {
+fn validate_request(request: &ChatCompletionRequest) -> Result<(), AgentError> {
     validate_openai_request(request)
-        .map_err(|message| ChatError::InvalidRequest(message))
+        .map_err(|message| AgentError::InvalidRequest(message))
 }
 
-fn ensure_model_matches(model: &str, request_model: &str) -> Result<(), ChatError> {
+fn ensure_model_matches(model: &str, request_model: &str) -> Result<(), AgentError> {
     if model != request_model {
-        return Err(ChatError::InvalidRequest(format!(
+        return Err(AgentError::InvalidRequest(format!(
             "request model {request_model} does not match provider model {model}"
         )));
     }

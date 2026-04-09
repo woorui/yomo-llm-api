@@ -1,46 +1,35 @@
 use std::collections::HashMap;
-use std::error::Error;
 use std::fmt;
 use std::pin::Pin;
 
 use futures_core::Stream;
 use futures_util::{future::join_all, StreamExt};
-use log::debug;
+use log::{debug, error};
 use opentelemetry::global;
 use opentelemetry::trace::{Span as OtelSpan, Status, Tracer};
 use opentelemetry::KeyValue;
 use serde_json::Value;
 use tracing::{Span, field, info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use yomo::types::{BodyFormat, RequestHeaders, ToolRequest, ToolResponse};
+use async_trait::async_trait;
 
 use crate::openai_types::{ChatCompletionRequest, Content, Message, Role, ToolDefinition};
 use crate::provider::{
-    ChatError, Provider, ToolCall as ProviderToolCall, UnifiedEvent, UnifiedResponse, Usage,
+    AgentError, Provider, ToolCall as ProviderToolCall, UnifiedEvent, UnifiedResponse, Usage,
 };
 use crate::providers::openai::mapper::ensure_tool_call_id;
+use yomo::tool_mgr::ToolMgr;
 
-#[derive(Debug, Clone)]
-pub struct ToolError {
-    pub code: String,
-    pub message: String,
-}
-
-impl fmt::Display for ToolError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl Error for ToolError {}
-
-pub trait ServerToolRegistry: Send + Sync {
-    type Ctx;
-    fn list(&self, ctx: &Self::Ctx) -> Vec<ToolDefinition>;
-}
-
-pub trait ServerToolInvoker: Send + Sync {
-    type Ctx;
-    fn invoke(&self, ctx: &Self::Ctx, name: &str, args: Value) -> Result<Value, ToolError>;
+#[async_trait]
+pub trait ToolInvoker: Send + Sync {
+    type Metadata;
+    async fn invoke(
+        &self,
+        metadata: &Self::Metadata,
+        headers: RequestHeaders,
+        request: ToolRequest,
+    ) -> ToolResponse;
 }
 
 pub struct AgentLoopConfig {
@@ -56,7 +45,7 @@ impl Default for AgentLoopConfig {
 pub enum AgentLoopResult {
     NonStream(UnifiedResponse),
     Stream {
-        events: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, ChatError>> + Send>>,
+        events: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, AgentError>> + Send>>,
     },
 }
 
@@ -71,37 +60,65 @@ struct ToolMaps {
     source_map: HashMap<String, ToolSource>,
 }
 
-pub async fn run_agent_loop<Ctx>(
+pub async fn run_agent_loop<A, M>(
     provider: std::sync::Arc<dyn Provider>,
     request: ChatCompletionRequest,
-    registry: std::sync::Arc<dyn ServerToolRegistry<Ctx = Ctx>>,
-    invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
-    ctx: Ctx,
+    tool_mgr: std::sync::Arc<dyn ToolMgr<A, M>>,
+    invoker: std::sync::Arc<dyn ToolInvoker<Metadata = M>>,
+    metadata: M,
+    trace_id: String,
+    extension: String,
     config: AgentLoopConfig,
     root_span: Span,
-) -> Result<AgentLoopResult, ChatError>
+) -> Result<AgentLoopResult, AgentError>
 where
-    Ctx: fmt::Display + Send + Sync + 'static,
+    A: Send + Sync + 'static,
+    M: fmt::Display + Send + Sync + 'static,
 {
-    let ctx = std::sync::Arc::new(ctx);
+    let metadata = std::sync::Arc::new(metadata);
     if request.stream.unwrap_or(false) {
-        run_agent_loop_stream(provider, request, registry, invoker, ctx, config, root_span).await
+        run_agent_loop_stream(
+            provider,
+            request,
+            tool_mgr,
+            invoker,
+            metadata,
+            trace_id,
+            extension,
+            config,
+            root_span,
+        )
+        .await
     } else {
-        run_agent_loop_nonstream(provider, request, registry, invoker, ctx, config, root_span).await
+        run_agent_loop_nonstream(
+            provider,
+            request,
+            tool_mgr,
+            invoker,
+            metadata,
+            trace_id,
+            extension,
+            config,
+            root_span,
+        )
+            .await
     }
 }
 
-async fn run_agent_loop_nonstream<Ctx>(
+async fn run_agent_loop_nonstream<A, M>(
     provider: std::sync::Arc<dyn Provider>,
     mut request: ChatCompletionRequest,
-    registry: std::sync::Arc<dyn ServerToolRegistry<Ctx = Ctx>>,
-    invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
-    ctx: std::sync::Arc<Ctx>,
+    tool_mgr: std::sync::Arc<dyn ToolMgr<A, M>>,
+    invoker: std::sync::Arc<dyn ToolInvoker<Metadata = M>>,
+    metadata: std::sync::Arc<M>,
+    trace_id: String,
+    extension: String,
     config: AgentLoopConfig,
     root_span: Span,
-) -> Result<AgentLoopResult, ChatError>
+) -> Result<AgentLoopResult, AgentError>
 where
-    Ctx: fmt::Display + Send + Sync + 'static,
+    A: Send + Sync + 'static,
+    M: fmt::Display + Send + Sync + 'static,
 {
     let mut call_count = 0usize;
     let mut total_usage = Usage {
@@ -112,7 +129,7 @@ where
         reasoning_tokens: None,
     };
     loop {
-        let tool_maps = build_tool_maps(&request, registry.as_ref(), ctx.as_ref());
+        let tool_maps = build_tool_maps(&request, tool_mgr.as_ref(), metadata.as_ref()).await?;
         request.tools = tool_maps.merged_tools.clone();
         if call_count > 0 {
             request.tool_choice = None;
@@ -133,11 +150,15 @@ where
         let mut response = provider
             .complete(request.clone())
             .await
-            .map_err(|err| ChatError::ProviderErr(err.to_string()))?;
+            .map_err(|err| AgentError::ProviderErr(err.to_string()))?;
         record_usage(&llm_span, &response.usage);
         add_usage(&mut total_usage, &response.usage);
         call_count += 1;
-        debug!("llm chat(#{call_count}), usage={:?} {}", response.usage, ctx.as_ref());
+        debug!(
+            "llm chat(#{call_count}), usage={:?} {}",
+            response.usage,
+            metadata.as_ref()
+        );
         drop(llm_span);
 
         if call_count >= config.max_calls {
@@ -176,10 +197,17 @@ where
             let mut next_messages = Vec::new();
             next_messages.push(build_assistant_tool_call_message(&request_id, &server_calls));
             next_messages.extend(
-                build_tool_messages::<Ctx>(&request_id, &server_calls, invoker.clone(), ctx.clone())
+                build_tool_messages::<M>(
+                    &request_id,
+                    &server_calls,
+                    invoker.clone(),
+                    metadata.clone(),
+                    trace_id.clone(),
+                    extension.clone(),
+                )
                     .await?,
             );
-            Ok::<Vec<Message>, ChatError>(next_messages)
+            Ok::<Vec<Message>, AgentError>(next_messages)
         }
         .instrument(tool_group_span)
         .await?;
@@ -187,17 +215,20 @@ where
     }
 }
 
-async fn run_agent_loop_stream<Ctx>(
+async fn run_agent_loop_stream<A, M>(
     provider: std::sync::Arc<dyn Provider>,
     mut request: ChatCompletionRequest,
-    registry: std::sync::Arc<dyn ServerToolRegistry<Ctx = Ctx>>,
-    invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
-    ctx: std::sync::Arc<Ctx>,
+    tool_mgr: std::sync::Arc<dyn ToolMgr<A, M>>,
+    invoker: std::sync::Arc<dyn ToolInvoker<Metadata = M>>,
+    metadata: std::sync::Arc<M>,
+    trace_id: String,
+    extension: String,
     config: AgentLoopConfig,
     root_span: Span,
-) -> Result<AgentLoopResult, ChatError>
+) -> Result<AgentLoopResult, AgentError>
 where
-    Ctx: fmt::Display + Send + Sync + 'static,
+    A: Send + Sync + 'static,
+    M: fmt::Display + Send + Sync + 'static,
 {
     let stream = async_stream::try_stream! {
         let mut call_count = 0usize;
@@ -209,7 +240,7 @@ where
             reasoning_tokens: None,
         };
         loop {
-            let tool_maps = build_tool_maps(&request, registry.as_ref(), ctx.as_ref());
+            let tool_maps = build_tool_maps(&request, tool_mgr.as_ref(), metadata.as_ref()).await?;
             request.tools = tool_maps.merged_tools.clone();
             if call_count > 0 {
                 request.tool_choice = None;
@@ -352,7 +383,11 @@ where
             if let Some(current_usage) = &usage {
                 record_usage(&llm_span, current_usage);
                 add_usage(&mut total_usage, current_usage);
-                debug!("llm chat(#{call_count}), usage={:?} {}", current_usage, ctx.as_ref());
+                debug!(
+                    "llm chat(#{call_count}), usage={:?} {}",
+                    current_usage,
+                    metadata.as_ref()
+                );
             }
             drop(llm_span);
             if call_count >= config.max_calls {
@@ -426,10 +461,17 @@ where
                 let mut tool_messages = Vec::new();
                 tool_messages.push(build_assistant_tool_call_message(&request_id, &server_calls));
                 tool_messages.extend(
-                    build_tool_messages::<Ctx>(&request_id, &server_calls, invoker.clone(), ctx.clone())
+                    build_tool_messages::<M>(
+                        &request_id,
+                        &server_calls,
+                        invoker.clone(),
+                        metadata.clone(),
+                        trace_id.clone(),
+                        extension.clone(),
+                    )
                         .await?,
                 );
-                Ok::<Vec<Message>, ChatError>(tool_messages)
+                Ok::<Vec<Message>, AgentError>(tool_messages)
             }
             .instrument(tool_group_span)
             .await?;
@@ -437,18 +479,30 @@ where
         }
     };
 
-    let boxed_stream: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, ChatError>> + Send>> =
+    let boxed_stream: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, AgentError>> + Send>> =
         Box::pin(stream);
     Ok(AgentLoopResult::Stream {
         events: boxed_stream,
     })
 }
 
-fn build_tool_maps<R>(request: &ChatCompletionRequest, registry: &R, ctx: &R::Ctx) -> ToolMaps
+async fn build_tool_maps<A, M>(
+    request: &ChatCompletionRequest,
+    tool_mgr: &dyn ToolMgr<A, M>,
+    metadata: &M,
+) -> Result<ToolMaps, AgentError>
 where
-    R: ServerToolRegistry + ?Sized,
+    A: Send + Sync + 'static,
+    M: Send + Sync,
 {
-    let server_tools = registry.list(ctx);
+    let server_tools = tool_mgr
+        .list_tools(metadata)
+        .await
+        .map_err(|err| AgentError::ProviderErr(format!("tool manager error: {err}")))?;
+    let server_tools = server_tools
+        .into_iter()
+        .filter_map(|(name, schema)| parse_tool_schema(&name, &schema))
+        .collect::<Vec<_>>();
     let mut source_map = HashMap::new();
     let mut merged = Vec::new();
     let mut server_lookup = HashMap::new();
@@ -478,14 +532,44 @@ where
         }
     }
 
-    ToolMaps {
+    Ok(ToolMaps {
         merged_tools: if merged.is_empty() {
             None
         } else {
             Some(merged)
         },
         source_map,
-    }
+    })
+}
+
+fn parse_tool_schema(name: &str, schema: &str) -> Option<ToolDefinition> {
+    let value: Value = match serde_json::from_str(schema) {
+        Ok(value) => value,
+        Err(err) => {
+            error!("failed to parse tool schema {name}: {err}");
+            return None;
+        }
+    };
+
+    let description = value
+        .get("description")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let strict = value.get("strict").and_then(|value| value.as_bool());
+    let parameters = value
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some(ToolDefinition {
+        r#type: "function".to_string(),
+        function: crate::openai_types::FunctionDefinition {
+            name: name.to_string(),
+            description,
+            strict,
+            parameters,
+        },
+    })
 }
 
 fn split_tool_calls(
@@ -515,25 +599,29 @@ fn ensure_provider_call_ids(request_id: &str, calls: &mut [ProviderToolCall]) {
     }
 }
 
-async fn build_tool_messages<Ctx>(
+async fn build_tool_messages<M>(
     request_id: &str,
     calls: &[ProviderToolCall],
-    invoker: std::sync::Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
-    ctx: std::sync::Arc<Ctx>,
-) -> Result<Vec<Message>, ChatError>
+    invoker: std::sync::Arc<dyn ToolInvoker<Metadata = M>>,
+    metadata: std::sync::Arc<M>,
+    trace_id: String,
+    extension: String,
+) -> Result<Vec<Message>, AgentError>
 where
-    Ctx: Send + Sync + 'static,
+    M: Send + Sync + 'static,
 {
     let request_id = request_id.to_string();
     let parent_span = Span::current();
     let parent_cx = parent_span.context();
     let tasks = calls.iter().cloned().enumerate().map(|(index, call)| {
         let invoker = invoker.clone();
-        let ctx = ctx.clone();
+        let metadata = metadata.clone();
+        let trace_id = trace_id.clone();
+        let extension = extension.clone();
         let request_id = request_id.clone();
         let parent_span = parent_span.clone();
         let parent_cx = parent_cx.clone();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn(async move {
             let _enter = parent_span.enter();
             let tracer = global::tracer("llm_api");
             let tool_name = call.name.clone();
@@ -548,34 +636,34 @@ where
                 "args_size",
                 call.arguments.as_bytes().len() as i64,
             ));
-            let args: Value = serde_json::from_str(&call.arguments)
-                .map_err(|err| {
-                    span.set_attribute(KeyValue::new("status", "error"));
-                    span.set_attribute(KeyValue::new("error", err.to_string()));
-                    span.set_status(Status::error(err.to_string()));
-                    ChatError::InvalidRequest(format!("invalid tool arguments: {err}"))
-                })?;
-            let result = invoker
-                .invoke(ctx.as_ref(), &call.name, args)
-                .map_err(|err| {
-                    span.set_attribute(KeyValue::new("status", "error"));
-                    span.set_attribute(KeyValue::new("error", err.to_string()));
-                    span.set_status(Status::error(err.to_string()));
-                    ChatError::ProviderErr(err.to_string())
-                })?;
-            let content = serde_json::to_string(&result)
-                .map_err(|err| {
-                    span.set_attribute(KeyValue::new("status", "error"));
-                    span.set_attribute(KeyValue::new("error", err.to_string()));
-                    span.set_status(Status::error(err.to_string()));
-                    ChatError::InvalidResponse(format!("invalid tool result: {err}"))
-                })?;
+            let request = ToolRequest {
+                args: call.arguments.clone(),
+                agent_context: None,
+            };
+            let request_headers = RequestHeaders {
+                name: call.name.clone(),
+                trace_id,
+                span_id: format!("tool-{}", call.name),
+                body_format: BodyFormat::Bytes,
+                extension,
+            };
+            let response = invoker
+                .invoke(metadata.as_ref(), request_headers, request)
+                .await;
+            let content = if let Some(error_msg) = response.error_msg {
+                span.set_attribute(KeyValue::new("status", "error"));
+                span.set_attribute(KeyValue::new("error", error_msg.clone()));
+                span.set_status(Status::error(error_msg.clone()));
+                error_msg
+            } else {
+                span.set_attribute(KeyValue::new("status", "ok"));
+                response.result.unwrap_or_default()
+            };
             span.set_attribute(KeyValue::new(
                 "result_size",
                 content.as_bytes().len() as i64,
             ));
             span.set_attribute(KeyValue::new("result", content.clone()));
-            span.set_attribute(KeyValue::new("status", "ok"));
             span.end();
             Ok(Message {
                 role: Role::Tool,
@@ -589,8 +677,8 @@ where
     let results = join_all(tasks).await;
     let mut messages = Vec::with_capacity(results.len());
     for result in results {
-        let message = result
-            .map_err(|err| ChatError::ProviderErr(format!("tool task join error: {err}")))??;
+            let message = result
+                .map_err(|err| AgentError::ProviderErr(format!("tool task join error: {err}")))??;
         messages.push(message);
     }
     Ok(messages)

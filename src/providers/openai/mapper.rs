@@ -4,7 +4,7 @@ use crate::openai_types::{
     ChatCompletionChunk, ChatCompletionChunkToolCall, ChatCompletionChunkToolCallFunction,
     Content as OpenAIContent, ContentPart, Usage as OpenAIUsage,
 };
-use crate::provider::{ChatError, FinishReason, ToolCall, UnifiedEvent, UnifiedResponse, Usage};
+use crate::provider::{AgentError, FinishReason, ToolCall, UnifiedEvent, UnifiedResponse, Usage};
 
 #[derive(Default)]
 pub struct ToolCallState {
@@ -22,12 +22,12 @@ pub struct ToolCallDeltaEvent {
 
 pub fn map_response(
     response: crate::openai_types::ChatCompletionResponse,
-) -> Result<UnifiedResponse, ChatError> {
+) -> Result<UnifiedResponse, AgentError> {
     let choice = response
         .choices
         .into_iter()
         .next()
-        .ok_or_else(|| ChatError::InvalidResponse("missing choices".to_string()))?;
+        .ok_or_else(|| AgentError::InvalidResponse("missing choices".to_string()))?;
     let finish_reason = map_finish_reason_to_provider(choice.finish_reason.as_deref());
     let output_text = extract_text(choice.message.content);
     let tool_calls = choice.message.tool_calls.map(|calls| {

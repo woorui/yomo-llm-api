@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -12,11 +13,13 @@ use log::{error, info};
 use opentelemetry::trace::TraceContextExt;
 use tracing::{Span, field, info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use yomo::tool_mgr::ToolMgr;
+use yomo::metadata_mgr::MetadataMgr;
+use yomo::auth::Auth;
 
-use crate::context::{RequestContext, TraceContext};
+use crate::metadata::Metadata;
 use crate::agent_loop::{
-    AgentLoopConfig, AgentLoopResult, ServerToolInvoker, ServerToolRegistry, ToolError,
-    run_agent_loop,
+    AgentLoopConfig, AgentLoopResult, ToolInvoker, run_agent_loop,
 };
 use crate::openai_http_mapping::{
     map_chat_error, map_openai_response, openai_error_response, stream_openai_chunks,
@@ -26,49 +29,36 @@ use crate::openai_types::ChatCompletionRequest;
 use crate::provider_registry::ProviderRegistry;
 use crate::provider_registry::ByModel;
 
-#[derive(Clone)]
-pub struct AppState<Ctx> {
-    pub registry: Arc<ProviderRegistry>,
-    pub tool_registry: Arc<dyn ServerToolRegistry<Ctx = Ctx>>,
-    pub tool_invoker: Arc<dyn ServerToolInvoker<Ctx = Ctx>>,
-    pub request_context_builder: Arc<dyn RequestContext<Ctx = Ctx>>,
+pub struct LlmApiState<A, M> {
+    pub registry: Arc<ProviderRegistry<M>>,
+    pub tool_mgr: Arc<dyn ToolMgr<A, M>>,
+    pub tool_invoker: Arc<dyn ToolInvoker<Metadata = M>>,
+    pub metadata_mgr: Arc<dyn MetadataMgr<A, M>>,
+    pub auth: Arc<dyn Auth<A>>,
 }
 
-
-pub struct EmptyToolRegistry;
-
-impl ServerToolRegistry for EmptyToolRegistry {
-    type Ctx = TraceContext;
-
-    fn list(&self, _ctx: &Self::Ctx) -> Vec<crate::openai_types::ToolDefinition> {
-        Vec::new()
+impl<A, M> Clone for LlmApiState<A, M> {
+    fn clone(&self) -> Self {
+        Self {
+            registry: Arc::clone(&self.registry),
+            tool_mgr: Arc::clone(&self.tool_mgr),
+            tool_invoker: Arc::clone(&self.tool_invoker),
+            metadata_mgr: Arc::clone(&self.metadata_mgr),
+            auth: Arc::clone(&self.auth),
+        }
     }
 }
 
-pub struct EmptyToolInvoker;
 
-impl ServerToolInvoker for EmptyToolInvoker {
-    type Ctx = TraceContext;
-
-    fn invoke(
-        &self,
-        _ctx: &Self::Ctx,
-        name: &str,
-        _args: serde_json::Value,
-    ) -> Result<serde_json::Value, ToolError> {
-        Err(ToolError {
-            code: "unsupported_tool".to_string(),
-            message: format!("no server tool invoker configured for {name}"),
-        })
-    }
-}
-
-pub async fn run_http_server(
+pub async fn run_http_server<A>(
     addr: SocketAddr,
-    state: AppState<TraceContext>,
-) -> Result<(), anyhow::Error> {
+    state: LlmApiState<A, Metadata>,
+) -> Result<(), anyhow::Error>
+where
+    A: Send + Sync + 'static,
+{
     let app = Router::new()
-        .route("/v1/chat/completions", post(handle_chat_completions))
+        .route("/v1/chat/completions", post(handle_chat_completions::<A>))
         .with_state(state);
 
     info!("listening on {addr}");
@@ -83,19 +73,50 @@ pub async fn run_http_server(
     Ok(())
 }
 
-pub fn build_provider_registry(config_path: &str) -> Result<ProviderRegistry, anyhow::Error> {
+pub fn build_provider_registry<M>(config_path: &str) -> Result<ProviderRegistry<M>, anyhow::Error> {
     let config = crate::config::Config::load(config_path)
         .and_then(|config| ProviderRegistry::from_config(&config, Arc::new(ByModel)))
         .map_err(|err| anyhow::anyhow!("failed to load config {config_path}: {err}"))?;
     Ok(config)
 }
 
-async fn handle_chat_completions(
-    State(state): State<AppState<TraceContext>>,
+async fn handle_chat_completions<A>(
+    State(state): State<LlmApiState<A, Metadata>>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
-    let mut ctx = state.request_context_builder.build_from_headers(&headers);
+) -> impl IntoResponse
+where
+    A: Send + Sync + 'static,
+{
+    let credential = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+    let auth_info = match state.auth.authenticate(&credential).await {
+        Ok(auth_info) => auth_info,
+        Err(err) => {
+            error!("authentication failed: {err}");
+            return openai_error_response(
+                StatusCode::UNAUTHORIZED,
+                &err.to_string(),
+                Some("authentication_error"),
+            );
+        }
+    };
+    let extension = extract_extension(&headers);
+    let mut metadata = match state.metadata_mgr.new_from_extension(&auth_info, &extension) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            error!("metadata build failed: {err}");
+            return openai_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &err.to_string(),
+                Some("server_error"),
+            );
+        }
+    };
     let root_span = info_span!(
         "http.request",
         http.method = "POST",
@@ -110,29 +131,52 @@ async fn handle_chat_completions(
         .span_context()
         .trace_id()
         .to_string();
-    ctx.trace_id = otel_trace_id;
+    metadata.trace_id = otel_trace_id;
 
-    info!("chat request received {}", ctx);
-    let ctx_for_error = ctx.clone();
-    match handle_chat_completions_inner(state, ctx, body, root_span.clone())
+    let trace_id = metadata.trace_id.clone();
+    let extension = metadata.extension.clone();
+    info!("chat request received {}", metadata);
+    let metadata_for_error = metadata.clone();
+    match handle_chat_completions_inner::<A, Metadata>(
+        state,
+        metadata,
+        trace_id,
+        extension,
+        body,
+        root_span.clone(),
+    )
         .instrument(root_span.clone())
         .await
     {
         Ok(response) => response,
         Err(err) => {
             root_span.record("http.status_code", StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64);
-            error!("chat completion failed: {err} {}", ctx_for_error);
+            error!("chat completion failed: {err} {}", metadata_for_error);
             openai_error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
         }
     }
 }
 
-async fn handle_chat_completions_inner(
-    state: AppState<TraceContext>,
-    ctx: TraceContext,
+fn extract_extension(headers: &HeaderMap) -> String {
+    headers
+        .get("X-Extension")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+async fn handle_chat_completions_inner<A, M>(
+    state: LlmApiState<A, M>,
+    metadata: M,
+    trace_id: String,
+    extension: String,
     body: Bytes,
     root_span: Span,
-) -> Result<Response, anyhow::Error> {
+) -> Result<Response, anyhow::Error>
+where
+    A: Send + Sync + 'static,
+    M: fmt::Display + Clone + Send + Sync + 'static,
+{
     let mut request: ChatCompletionRequest =
         serde_json::from_slice(&body).context("invalid json body")?;
     let stream = request.stream.unwrap_or(false);
@@ -153,12 +197,12 @@ async fn handle_chat_completions_inner(
     }
     info!(
         "chat request parsed: model={}, stream={} {}",
-        request.model, stream, ctx
+        request.model, stream, metadata
     );
     if let Err(message) = validate_openai_request(&request) {
         error!(
             "chat request invalid: model={}, error={} {}",
-            request.model, message, ctx
+            request.model, message, metadata
         );
         root_span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
         return Ok(openai_error_response(
@@ -168,12 +212,12 @@ async fn handle_chat_completions_inner(
         ));
     }
 
-    let provider = match state.registry.select(&request.model, &ctx) {
+    let provider = match state.registry.select(&request.model, &metadata) {
         Ok(entry) => Arc::clone(&entry.provider),
         Err(err) => {
             error!(
                 "chat selection failed: model={}, error={} {}",
-                request.model, err, ctx
+                request.model, err, metadata
             );
             root_span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
             return Ok(openai_error_response(
@@ -186,13 +230,15 @@ async fn handle_chat_completions_inner(
 
     let model_for_log = request.model.clone();
     let request_model = request.model.clone();
-    let ctx_for_log = ctx.clone();
+    let metadata_for_log = metadata.clone();
     let loop_result = run_agent_loop(
         provider,
         request,
-        Arc::clone(&state.tool_registry),
+        Arc::clone(&state.tool_mgr),
         Arc::clone(&state.tool_invoker),
-        ctx,
+        metadata,
+        trace_id.clone(),
+        extension,
         AgentLoopConfig::default(),
         root_span.clone(),
     )
@@ -200,7 +246,10 @@ async fn handle_chat_completions_inner(
 
     match loop_result {
         Ok(AgentLoopResult::NonStream(response)) => {
-            info!("chat request success: model={} {}", response.model, ctx_for_log);
+            info!(
+                "chat request success: model={} {}",
+                response.model, metadata_for_log
+            );
             let mapped = map_openai_response(response);
             let payload = serde_json::to_vec(&mapped).context("serialize response")?;
             root_span.record("http.status_code", StatusCode::OK.as_u16() as i64);
@@ -211,12 +260,7 @@ async fn handle_chat_completions_inner(
         }
         Ok(AgentLoopResult::Stream { events }) => {
             root_span.record("http.status_code", StatusCode::OK.as_u16() as i64);
-            let sse = stream_openai_chunks(
-                events,
-                ctx_for_log.trace_id.clone(),
-                request_model,
-                root_span.clone(),
-            );
+            let sse = stream_openai_chunks(events, trace_id, request_model, root_span.clone());
             let body = Body::from_stream(sse);
             Ok(Response::builder()
                 .status(StatusCode::OK)
@@ -226,7 +270,7 @@ async fn handle_chat_completions_inner(
         Err(err) => {
             error!(
                 "chat request failed: model={}, error={} {}",
-                model_for_log, err, ctx_for_log
+                model_for_log, err, metadata_for_log
             );
             let response = map_chat_error(err);
             root_span.record("http.status_code", response.status().as_u16() as i64);

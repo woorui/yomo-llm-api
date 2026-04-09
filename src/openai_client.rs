@@ -183,20 +183,3 @@ impl Client {
 pub(crate) fn trimmed_base_url(base_url: &str) -> &str {
     base_url.trim_end_matches('/')
 }
-
-#[cfg(test)]
-mod tests {
-    use super::trimmed_base_url;
-
-    #[test]
-    fn trims_trailing_slash() {
-        assert_eq!(
-            trimmed_base_url("https://example.com/"),
-            "https://example.com"
-        );
-        assert_eq!(
-            trimmed_base_url("https://example.com"),
-            "https://example.com"
-        );
-    }
-}

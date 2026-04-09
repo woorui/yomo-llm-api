@@ -22,17 +22,3 @@ impl fmt::Display for ConfigError {
 
 impl Error for ConfigError {}
 
-#[derive(Debug)]
-pub enum ProviderError {
-    Unsupported(String),
-}
-
-impl fmt::Display for ProviderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ProviderError::Unsupported(message) => write!(f, "unsupported: {message}"),
-        }
-    }
-}
-
-impl Error for ProviderError {}

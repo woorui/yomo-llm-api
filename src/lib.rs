@@ -1,8 +1,9 @@
 pub mod agent_loop;
-pub mod context;
+pub mod metadata;
 pub mod config;
 pub mod error;
 pub mod llm_api;
+pub mod conn_tool_invoker;
 pub mod mock_get_weather;
 pub mod openai_client;
 pub mod openai_http_mapping;

@@ -1,15 +1,19 @@
+use std::collections::HashMap;
 use serde_json::json;
 use std::marker::PhantomData;
 
-use crate::agent_loop::{ServerToolInvoker, ServerToolRegistry, ToolError};
-use crate::openai_types::{FunctionDefinition, ToolDefinition};
+use anyhow::Result;
+use async_trait::async_trait;
+use crate::agent_loop::ToolInvoker;
+use yomo::types::{RequestHeaders, ToolRequest, ToolResponse};
+use yomo::tool_mgr::ToolMgr;
 
 #[derive(Clone)]
-pub struct WeatherToolRegistry<Ctx> {
+pub struct WeatherToolMgr<Ctx> {
     _marker: PhantomData<Ctx>,
 }
 
-impl<Ctx> Default for WeatherToolRegistry<Ctx> {
+impl<Ctx> Default for WeatherToolMgr<Ctx> {
     fn default() -> Self {
         Self {
             _marker: PhantomData,
@@ -17,25 +21,25 @@ impl<Ctx> Default for WeatherToolRegistry<Ctx> {
     }
 }
 
-impl<Ctx: Send + Sync> ServerToolRegistry for WeatherToolRegistry<Ctx> {
-    type Ctx = Ctx;
+#[async_trait]
+impl<Ctx: Send + Sync> ToolMgr<(), Ctx> for WeatherToolMgr<Ctx> {
+    async fn upsert_tool(&self, _tool_name: String, _schema: String, _auth_info: &()) -> Result<()> {
+        Ok(())
+    }
 
-    fn list(&self, _ctx: &Self::Ctx) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            r#type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "get_weather".to_string(),
-                description: Some("Get weather by city".to_string()),
-                strict: None,
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "location": {"type": "string"}
-                    },
-                    "required": ["location"]
-                }),
-            },
-        }]
+    async fn list_tools(&self, _metadata: &Ctx) -> Result<HashMap<String, String>> {
+        let schema = json!({
+            "description": "Get weather by city",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"}
+                },
+                "required": ["location"]
+            }
+        })
+        .to_string();
+        Ok(HashMap::from([("get_weather".to_string(), schema)]))
     }
 }
 
@@ -52,32 +56,40 @@ impl<Ctx> Default for WeatherToolInvoker<Ctx> {
     }
 }
 
-impl<Ctx: Send + Sync> ServerToolInvoker for WeatherToolInvoker<Ctx> {
-    type Ctx = Ctx;
+#[async_trait]
+impl<Ctx: Send + Sync> ToolInvoker for WeatherToolInvoker<Ctx> {
+    type Metadata = Ctx;
 
-    fn invoke(
+    async fn invoke(
         &self,
-        _ctx: &Self::Ctx,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<serde_json::Value, ToolError> {
-        if name != "get_weather" {
-            return Err(ToolError {
-                code: "unknown_tool".to_string(),
-                message: format!("unsupported tool: {name}"),
-            });
+        _metadata: &Self::Metadata,
+        headers: RequestHeaders,
+        request: ToolRequest,
+    ) -> ToolResponse {
+        if headers.name != "get_weather" {
+            return ToolResponse {
+                result: None,
+                error_msg: Some(format!("unsupported tool: {}", headers.name)),
+            };
         }
 
+        let args: serde_json::Value = serde_json::from_str(&request.args).unwrap_or_default();
         let location = args
             .get("location")
             .and_then(|value| value.as_str())
             .unwrap_or("unknown")
             .to_string();
 
-        Ok(json!({
+        let result = json!({
             "location": location,
             "temperature_c": 21,
             "condition": "sunny"
-        }))
+        })
+        .to_string();
+
+        ToolResponse {
+            result: Some(result),
+            error_msg: None,
+        }
     }
 }

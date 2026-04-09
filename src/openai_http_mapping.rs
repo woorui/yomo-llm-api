@@ -14,7 +14,7 @@ use crate::openai_types::{
     ChatCompletionResponse, Content as OpenAIContent, ContentPart, ErrorResponse, Role,
     ToolCall as OpenAIToolCall, ToolCallFunction, ToolChoice, Usage,
 };
-use crate::provider::{ChatError, FinishReason, ToolCall, UnifiedEvent, UnifiedResponse};
+use crate::provider::{AgentError, FinishReason, ToolCall, UnifiedEvent, UnifiedResponse};
 
 pub fn map_openai_response(response: UnifiedResponse) -> ChatCompletionResponse {
     let content = if response.output_text.is_empty() {
@@ -164,7 +164,7 @@ pub fn validate_openai_request(request: &ChatCompletionRequest) -> Result<(), St
 }
 
 pub fn stream_openai_chunks(
-    stream: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, ChatError>> + Send>>,
+    stream: Pin<Box<dyn Stream<Item = Result<UnifiedEvent, AgentError>> + Send>>,
     trace_id: String,
     default_model: String,
     root_span: Span,
@@ -519,19 +519,19 @@ pub fn openai_error_response(
         .expect("build error response")
 }
 
-pub fn map_chat_error(err: ChatError) -> axum::response::Response {
+pub fn map_chat_error(err: AgentError) -> axum::response::Response {
     match err {
-        ChatError::InvalidRequest(message) => openai_error_response(
+        AgentError::InvalidRequest(message) => openai_error_response(
             axum::http::StatusCode::BAD_REQUEST,
             &message,
             Some("invalid_request_error"),
         ),
-        ChatError::InvalidResponse(message) => openai_error_response(
+        AgentError::InvalidResponse(message) => openai_error_response(
             axum::http::StatusCode::BAD_GATEWAY,
             &message,
             Some("invalid_response_error"),
         ),
-        ChatError::ProviderErr(message) => openai_error_response(
+        AgentError::ProviderErr(message) => openai_error_response(
             axum::http::StatusCode::BAD_GATEWAY,
             &message,
             Some("provider_error"),

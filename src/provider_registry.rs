@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::context::TraceContext;
 use crate::error::ConfigError;
 use crate::provider::Provider;
 use crate::providers::openai::build_openai_provider;
@@ -17,30 +16,30 @@ pub struct ProviderEntry {
     pub provider: Arc<dyn Provider>,
 }
 
-pub struct ProviderRegistry {
+pub struct ProviderRegistry<M> {
     providers: HashMap<ProviderId, ProviderEntry>,
-    strategy: Arc<dyn SelectionStrategy>,
+    strategy: Arc<dyn SelectionStrategy<M>>,
     default_provider_id: ProviderId,
 }
 
-pub trait SelectionStrategy: Send + Sync {
+pub trait SelectionStrategy<M>: Send + Sync {
     fn select(
         &self,
         model: &str,
-        ctx: &TraceContext,
-        registry: &ProviderRegistry,
+        metadata: &M,
+        registry: &ProviderRegistry<M>,
     ) -> Result<String, anyhow::Error>;
 }
 
 #[derive(Default)]
 pub struct ByModel;
 
-impl SelectionStrategy for ByModel {
+impl<M> SelectionStrategy<M> for ByModel {
     fn select(
         &self,
         model: &str,
-        _ctx: &TraceContext,
-        registry: &ProviderRegistry,
+        _metadata: &M,
+        registry: &ProviderRegistry<M>,
     ) -> Result<String, anyhow::Error> {
         if model.trim().is_empty() {
             return Err(anyhow::anyhow!("model is required"));
@@ -56,12 +55,12 @@ impl SelectionStrategy for ByModel {
     }
 }
 
-pub type StrategyRef = Arc<dyn SelectionStrategy>;
+pub type StrategyRef<M> = Arc<dyn SelectionStrategy<M>>;
 
-impl ProviderRegistry {
+impl<M> ProviderRegistry<M> {
     pub fn from_config(
         config: &Config,
-        strategy: Arc<dyn SelectionStrategy>,
+        strategy: Arc<dyn SelectionStrategy<M>>,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
 
@@ -94,7 +93,7 @@ impl ProviderRegistry {
 
     pub fn new(
         providers: HashMap<ProviderId, ProviderEntry>,
-        strategy: Arc<dyn SelectionStrategy>,
+        strategy: Arc<dyn SelectionStrategy<M>>,
         default_provider_id: ProviderId,
     ) -> Self {
         Self {
@@ -104,8 +103,8 @@ impl ProviderRegistry {
         }
     }
 
-    pub fn select(&self, model: &str, ctx: &TraceContext) -> Result<&ProviderEntry, anyhow::Error> {
-        let selected = self.strategy.select(model, ctx, self).ok();
+    pub fn select(&self, model: &str, metadata: &M) -> Result<&ProviderEntry, anyhow::Error> {
+        let selected = self.strategy.select(model, metadata, self).ok();
         let id = selected
             .as_ref()
             .and_then(|id| self.providers.get_key_value(id).map(|(key, _)| key))

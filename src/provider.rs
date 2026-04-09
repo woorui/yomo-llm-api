@@ -127,23 +127,23 @@ pub enum UnifiedEvent {
 }
 
 #[derive(Debug)]
-pub enum ChatError {
+pub enum AgentError {
     InvalidRequest(String),
     InvalidResponse(String),
     ProviderErr(String),
 }
 
-impl std::fmt::Display for ChatError {
+impl std::fmt::Display for AgentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChatError::InvalidRequest(message) => write!(f, "invalid request: {message}"),
-            ChatError::InvalidResponse(message) => write!(f, "invalid response: {message}"),
-            ChatError::ProviderErr(message) => write!(f, "provider error: {message}"),
+            AgentError::InvalidRequest(message) => write!(f, "invalid request: {message}"),
+            AgentError::InvalidResponse(message) => write!(f, "invalid response: {message}"),
+            AgentError::ProviderErr(message) => write!(f, "provider error: {message}"),
         }
     }
 }
 
-impl std::error::Error for ChatError {}
+impl std::error::Error for AgentError {}
 
 pub trait Provider: Send + Sync {
     fn model(&self) -> &str;
@@ -151,10 +151,10 @@ pub trait Provider: Send + Sync {
     fn complete<'a>(
         &'a self,
         request: ChatCompletionRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<UnifiedResponse, ChatError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<UnifiedResponse, AgentError>> + Send + 'a>>;
 
     fn stream<'a>(
         &'a self,
         request: ChatCompletionRequest,
-    ) -> Pin<Box<dyn Stream<Item = Result<UnifiedEvent, ChatError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Stream<Item = Result<UnifiedEvent, AgentError>> + Send + 'a>>;
 }
