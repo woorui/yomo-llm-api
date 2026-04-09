@@ -17,7 +17,7 @@ use llm_api::tool_invoker::ToolInvoker;
 use llm_api::metadata::{Metadata, MetadataBuilder};
 use llm_api::tool_invoker::ConnToolInvoker;
 use llm_api::llm_api::{
-    LlmApiState, build_provider_registry, run_http_server,
+    DefaultHeaderExtractor, LlmApiState, build_provider_registry, run_http_server,
 };
 use llm_api::mock_get_weather::{WeatherToolInvoker, WeatherToolMgr};
 use yomo::auth::AuthImpl;
@@ -71,6 +71,7 @@ async fn main() {
         metadata_mgr: Arc::new(MetadataBuilder::default())
             as Arc<dyn yomo::metadata_mgr::MetadataMgr<(), Metadata>>,
         auth: Arc::new(AuthImpl::new(None)),
+        header_extractor: Arc::new(DefaultHeaderExtractor::default()),
     };
 
     if let Err(err) = run_http_server(addr, state).await {

@@ -36,6 +36,7 @@ pub struct LlmApiState<A, M> {
     pub tool_invoker: Arc<dyn ToolInvoker<M>>,
     pub metadata_mgr: Arc<dyn MetadataMgr<A, M>>,
     pub auth: Arc<dyn Auth<A>>,
+    pub header_extractor: Arc<dyn HeaderExtractor>,
 }
 
 impl<A, M> Clone for LlmApiState<A, M> {
@@ -46,7 +47,35 @@ impl<A, M> Clone for LlmApiState<A, M> {
             tool_invoker: Arc::clone(&self.tool_invoker),
             metadata_mgr: Arc::clone(&self.metadata_mgr),
             auth: Arc::clone(&self.auth),
+            header_extractor: Arc::clone(&self.header_extractor),
         }
+    }
+}
+
+pub trait HeaderExtractor: Send + Sync {
+    fn credential(&self, headers: &HeaderMap) -> String;
+    fn extension(&self, headers: &HeaderMap) -> String;
+}
+
+#[derive(Default)]
+pub struct DefaultHeaderExtractor;
+
+impl HeaderExtractor for DefaultHeaderExtractor {
+    fn credential(&self, headers: &HeaderMap) -> String {
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn extension(&self, headers: &HeaderMap) -> String {
+        headers
+            .get("X-Extension")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string()
     }
 }
 
@@ -89,12 +118,7 @@ async fn handle_chat_completions<A>(
 where
     A: Send + Sync + 'static,
 {
-    let credential = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .unwrap_or("")
-        .to_string();
+    let credential = state.header_extractor.credential(&headers);
     let auth_info = match state.auth.authenticate(&credential).await {
         Ok(auth_info) => auth_info,
         Err(err) => {
@@ -106,7 +130,7 @@ where
             );
         }
     };
-    let extension = extract_extension(&headers);
+    let extension = state.header_extractor.extension(&headers);
     let mut metadata = match state.metadata_mgr.new_from_extension(&auth_info, &extension) {
         Ok(metadata) => metadata,
         Err(err) => {
@@ -158,13 +182,6 @@ where
     }
 }
 
-fn extract_extension(headers: &HeaderMap) -> String {
-    headers
-        .get("X-Extension")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_string()
-}
 
 async fn handle_chat_completions_inner<A, M>(
     state: LlmApiState<A, M>,
