@@ -3,7 +3,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use std::pin::Pin;
 
-use crate::error::ConfigError;
+use crate::config::ConfigError;
 use crate::openai_client;
 use crate::openai_http_mapping::validate_openai_request;
 use crate::openai_types::ChatCompletionRequest;

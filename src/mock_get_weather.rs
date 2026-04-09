@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::agent_loop::ToolInvoker;
+use crate::tool_invoker::ToolInvoker;
 use yomo::types::{RequestHeaders, ToolRequest, ToolResponse};
 use yomo::tool_mgr::ToolMgr;
 

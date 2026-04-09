@@ -13,9 +13,9 @@ use tracing::subscriber::set_global_default;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-use llm_api::agent_loop::ToolInvoker;
+use llm_api::tool_invoker::ToolInvoker;
 use llm_api::metadata::{Metadata, MetadataBuilder};
-use llm_api::conn_tool_invoker::ConnToolInvoker;
+use llm_api::tool_invoker::ConnToolInvoker;
 use llm_api::llm_api::{
     LlmApiState, build_provider_registry, run_http_server,
 };
@@ -59,7 +59,7 @@ async fn main() {
         let connector = yomo::connector::MemoryConnector::new(tool_tx, 64 * 1024);
         (
             Arc::new(ToolMgrImpl::new()) as Arc<dyn yomo::tool_mgr::ToolMgr<(), Metadata>>,
-            Arc::new(ConnToolInvoker::<Metadata>::new(Arc::new(connector)))
+            Arc::new(ConnToolInvoker::<Metadata, _, _, _>::new(Arc::new(connector)))
                 as Arc<dyn ToolInvoker<Metadata>>,
         )
     };

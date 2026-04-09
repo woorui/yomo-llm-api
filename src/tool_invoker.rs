@@ -3,20 +3,28 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::AsyncWriteExt;
-use yomo::connector::{Connector, MemoryConnector};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use yomo::connector::Connector;
 use yomo::io::{receive_frame, send_frame};
 use yomo::types::{RequestHeaders, ResponseHeaders, ToolRequest, ToolResponse};
 
-use crate::agent_loop::ToolInvoker;
-
-pub struct ConnToolInvoker<Metadata> {
-    connector: Arc<MemoryConnector>,
-    _marker: PhantomData<Metadata>,
+#[async_trait]
+pub trait ToolInvoker<M>: Send + Sync {
+    async fn invoke(
+        &self,
+        metadata: &M,
+        headers: RequestHeaders,
+        request: ToolRequest,
+    ) -> ToolResponse;
 }
 
-impl<Metadata> ConnToolInvoker<Metadata> {
-    pub fn new(connector: Arc<MemoryConnector>) -> Self {
+pub struct ConnToolInvoker<Metadata, C, R, W> {
+    connector: Arc<C>,
+    _marker: PhantomData<(Metadata, R, W)>,
+}
+
+impl<Metadata, C, R, W> ConnToolInvoker<Metadata, C, R, W> {
+    pub fn new(connector: Arc<C>) -> Self {
         Self {
             connector,
             _marker: PhantomData,
@@ -25,9 +33,12 @@ impl<Metadata> ConnToolInvoker<Metadata> {
 }
 
 #[async_trait]
-impl<Metadata> ToolInvoker<Metadata> for ConnToolInvoker<Metadata>
+impl<Metadata, C, R, W> ToolInvoker<Metadata> for ConnToolInvoker<Metadata, C, R, W>
 where
     Metadata: fmt::Display + Send + Sync + 'static,
+    C: Connector<R, W> + Send + Sync + 'static,
+    R: AsyncReadExt + Unpin + Send + Sync + 'static,
+    W: AsyncWriteExt + Unpin + Send + Sync + 'static,
 {
     async fn invoke(
         &self,

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::error::ConfigError;
+use crate::config::ConfigError;
 use crate::provider::Provider;
 use crate::providers::openai::build_openai_provider;
 

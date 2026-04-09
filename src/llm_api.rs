@@ -19,8 +19,9 @@ use yomo::auth::Auth;
 
 use crate::metadata::Metadata;
 use crate::agent_loop::{
-    AgentLoopConfig, AgentLoopResult, ToolInvoker, run_agent_loop,
+    AgentLoopConfig, AgentLoopResult, run_agent_loop,
 };
+use crate::tool_invoker::ToolInvoker;
 use crate::openai_http_mapping::{
     map_chat_error, map_openai_response, openai_error_response, stream_openai_chunks,
     validate_openai_request,

@@ -11,8 +11,9 @@ use opentelemetry::KeyValue;
 use serde_json::Value;
 use tracing::{Span, field, info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use yomo::types::{BodyFormat, RequestHeaders, ToolRequest, ToolResponse};
-use async_trait::async_trait;
+use yomo::types::{BodyFormat, RequestHeaders, ToolRequest};
+use crate::tool_invoker::ToolInvoker;
+
 
 use crate::openai_types::{ChatCompletionRequest, Content, Message, Role, ToolDefinition};
 use crate::provider::{
@@ -20,16 +21,6 @@ use crate::provider::{
 };
 use crate::providers::openai::mapper::ensure_tool_call_id;
 use yomo::tool_mgr::ToolMgr;
-
-#[async_trait]
-pub trait ToolInvoker<M>: Send + Sync {
-    async fn invoke(
-        &self,
-        metadata: &M,
-        headers: RequestHeaders,
-        request: ToolRequest,
-    ) -> ToolResponse;
-}
 
 pub struct AgentLoopConfig {
     pub max_calls: usize,
