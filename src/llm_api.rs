@@ -32,7 +32,7 @@ use crate::provider_registry::ByModel;
 pub struct LlmApiState<A, M> {
     pub registry: Arc<ProviderRegistry<M>>,
     pub tool_mgr: Arc<dyn ToolMgr<A, M>>,
-    pub tool_invoker: Arc<dyn ToolInvoker<Metadata = M>>,
+    pub tool_invoker: Arc<dyn ToolInvoker<M>>,
     pub metadata_mgr: Arc<dyn MetadataMgr<A, M>>,
     pub auth: Arc<dyn Auth<A>>,
 }

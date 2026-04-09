@@ -57,12 +57,10 @@ impl<Ctx> Default for WeatherToolInvoker<Ctx> {
 }
 
 #[async_trait]
-impl<Ctx: Send + Sync> ToolInvoker for WeatherToolInvoker<Ctx> {
-    type Metadata = Ctx;
-
+impl<Metadata: Send + Sync> ToolInvoker<Metadata> for WeatherToolInvoker<Metadata> {
     async fn invoke(
         &self,
-        _metadata: &Self::Metadata,
+        _metadata: &Metadata,
         headers: RequestHeaders,
         request: ToolRequest,
     ) -> ToolResponse {

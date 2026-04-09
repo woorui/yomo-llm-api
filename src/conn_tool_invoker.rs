@@ -25,15 +25,13 @@ impl<Metadata> ConnToolInvoker<Metadata> {
 }
 
 #[async_trait]
-impl<Metadata> ToolInvoker for ConnToolInvoker<Metadata>
+impl<Metadata> ToolInvoker<Metadata> for ConnToolInvoker<Metadata>
 where
     Metadata: fmt::Display + Send + Sync + 'static,
 {
-    type Metadata = Metadata;
-
     async fn invoke(
         &self,
-        _metadata: &Self::Metadata,
+        _metadata: &Metadata,
         headers: RequestHeaders,
         request: ToolRequest,
     ) -> ToolResponse {

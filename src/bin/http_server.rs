@@ -52,7 +52,7 @@ async fn main() {
             Arc::new(WeatherToolMgr::<Metadata>::default())
                 as Arc<dyn yomo::tool_mgr::ToolMgr<(), Metadata>>,
             Arc::new(WeatherToolInvoker::<Metadata>::default())
-                as Arc<dyn ToolInvoker<Metadata = Metadata>>,
+                as Arc<dyn ToolInvoker<Metadata>>,
         )
     } else {
         let (tool_tx, _tool_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -60,7 +60,7 @@ async fn main() {
         (
             Arc::new(ToolMgrImpl::new()) as Arc<dyn yomo::tool_mgr::ToolMgr<(), Metadata>>,
             Arc::new(ConnToolInvoker::<Metadata>::new(Arc::new(connector)))
-                as Arc<dyn ToolInvoker<Metadata = Metadata>>,
+                as Arc<dyn ToolInvoker<Metadata>>,
         )
     };
 

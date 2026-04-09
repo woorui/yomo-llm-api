@@ -22,11 +22,10 @@ use crate::providers::openai::mapper::ensure_tool_call_id;
 use yomo::tool_mgr::ToolMgr;
 
 #[async_trait]
-pub trait ToolInvoker: Send + Sync {
-    type Metadata;
+pub trait ToolInvoker<M>: Send + Sync {
     async fn invoke(
         &self,
-        metadata: &Self::Metadata,
+        metadata: &M,
         headers: RequestHeaders,
         request: ToolRequest,
     ) -> ToolResponse;
@@ -64,7 +63,7 @@ pub async fn run_agent_loop<A, M>(
     provider: std::sync::Arc<dyn Provider>,
     request: ChatCompletionRequest,
     tool_mgr: std::sync::Arc<dyn ToolMgr<A, M>>,
-    invoker: std::sync::Arc<dyn ToolInvoker<Metadata = M>>,
+    invoker: std::sync::Arc<dyn ToolInvoker<M>>,
     metadata: M,
     trace_id: String,
     extension: String,
@@ -109,7 +108,7 @@ async fn run_agent_loop_nonstream<A, M>(
     provider: std::sync::Arc<dyn Provider>,
     mut request: ChatCompletionRequest,
     tool_mgr: std::sync::Arc<dyn ToolMgr<A, M>>,
-    invoker: std::sync::Arc<dyn ToolInvoker<Metadata = M>>,
+    invoker: std::sync::Arc<dyn ToolInvoker<M>>,
     metadata: std::sync::Arc<M>,
     trace_id: String,
     extension: String,
@@ -219,7 +218,7 @@ async fn run_agent_loop_stream<A, M>(
     provider: std::sync::Arc<dyn Provider>,
     mut request: ChatCompletionRequest,
     tool_mgr: std::sync::Arc<dyn ToolMgr<A, M>>,
-    invoker: std::sync::Arc<dyn ToolInvoker<Metadata = M>>,
+    invoker: std::sync::Arc<dyn ToolInvoker<M>>,
     metadata: std::sync::Arc<M>,
     trace_id: String,
     extension: String,
@@ -602,7 +601,7 @@ fn ensure_provider_call_ids(request_id: &str, calls: &mut [ProviderToolCall]) {
 async fn build_tool_messages<M>(
     request_id: &str,
     calls: &[ProviderToolCall],
-    invoker: std::sync::Arc<dyn ToolInvoker<Metadata = M>>,
+    invoker: std::sync::Arc<dyn ToolInvoker<M>>,
     metadata: std::sync::Arc<M>,
     trace_id: String,
     extension: String,
