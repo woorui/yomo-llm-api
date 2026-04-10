@@ -194,6 +194,7 @@ where
                     metadata.clone(),
                     trace_id.clone(),
                     extension.clone(),
+                    request.agent_context.clone(),
                 )
                     .await?,
             );
@@ -458,6 +459,7 @@ where
                         metadata.clone(),
                         trace_id.clone(),
                         extension.clone(),
+                        request.agent_context.clone(),
                     )
                         .await?,
                 );
@@ -596,10 +598,12 @@ async fn build_tool_messages<M>(
     metadata: std::sync::Arc<M>,
     trace_id: String,
     extension: String,
+    agent_context: Option<Value>,
 ) -> Result<Vec<Message>, AgentError>
 where
     M: Send + Sync + 'static,
 {
+    let agent_context = agent_context.map(|value| value.to_string());
     let request_id = request_id.to_string();
     let parent_span = Span::current();
     let parent_cx = parent_span.context();
@@ -608,6 +612,7 @@ where
         let metadata = metadata.clone();
         let trace_id = trace_id.clone();
         let extension = extension.clone();
+        let agent_context = agent_context.clone();
         let request_id = request_id.clone();
         let parent_span = parent_span.clone();
         let parent_cx = parent_cx.clone();
@@ -628,7 +633,7 @@ where
             ));
             let request = ToolRequest {
                 args: call.arguments.clone(),
-                agent_context: None,
+                agent_context,
             };
             let request_headers = RequestHeaders {
                 name: call.name.clone(),

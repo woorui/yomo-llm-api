@@ -140,6 +140,8 @@ pub struct ChatCompletionRequest {
     pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
