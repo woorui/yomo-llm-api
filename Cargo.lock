@@ -3868,6 +3868,8 @@ dependencies = [
 [[package]]
 name = "yomo"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5894358b8d61130b0f2c50d1ccae743c96260941ea6356d45ef86bf213611ab8"
 dependencies = [
  "anyhow",
  "async-trait",

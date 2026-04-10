@@ -25,4 +25,4 @@ config = "0.15"
 tracing = "0.1"
 tracing-opentelemetry = "0.23"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-yomo = { path = "../../../workspace/yomorun/yomo" }
+yomo = "0.6"
