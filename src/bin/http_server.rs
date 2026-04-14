@@ -17,8 +17,12 @@ use llm_api::tool_invoker::ToolInvoker;
 use llm_api::metadata::{Metadata, MetadataBuilder};
 use llm_api::tool_invoker::ConnToolInvoker;
 use llm_api::llm_api::{
-    DefaultHeaderExtractor, LlmApiState, build_provider_registry, run_http_server,
+    DefaultHeaderExtractor, LlmApiState, run_http_server,
 };
+use llm_api::config::Config;
+use llm_api::model_api::ModelApi;
+use llm_api::providers::openai::build_openai_provider;
+use llm_api::provider_registry::ByModel;
 use llm_api::mock_get_weather::{WeatherToolInvoker, WeatherToolMgr};
 use yomo::auth::AuthImpl;
 use yomo::tool_mgr::ToolMgrImpl;
@@ -33,13 +37,51 @@ async fn main() {
     let port = "8000".to_string();
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().expect("invalid PORT");
 
-    let registry = match build_provider_registry::<Metadata>(&config_path) {
-        Ok(registry) => registry,
+    let config = match Config::load(&config_path).and_then(|config| {
+        config.validate()?;
+        Ok(config)
+    }) {
+        Ok(config) => config,
         Err(err) => {
-            error!("{err}");
+            error!("failed to load config {config_path}: {err}");
             return;
         }
     };
+    let endpoint_routes = match config.endpoint_map() {
+        Ok(routes) => routes,
+        Err(err) => {
+            error!("failed to load endpoint routes: {err}");
+            return;
+        }
+    };
+    let providers = config
+        .providers
+        .into_iter()
+        .map(|provider| (provider.id.clone(), provider))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut agent_providers = std::collections::HashMap::new();
+    for (id, provider) in &providers {
+        if provider.provider_type != "openai" {
+            continue;
+        }
+        match build_openai_provider(&provider.params) {
+            Ok(built) => {
+                agent_providers.insert(id.clone(), Arc::new(built) as Arc<dyn llm_api::provider::Provider>);
+            }
+            Err(err) => {
+                error!("failed to build provider {id}: {err}");
+                return;
+            }
+        }
+    }
+    let model_api = match ModelApi::new(endpoint_routes.clone(), &providers) {
+        Ok(model_api) => model_api,
+        Err(err) => {
+            error!("failed to init endpoint proxy: {err}");
+            return;
+        }
+    };
+    let route_strategy = Arc::new(ByModel::new(endpoint_routes.clone()));
 
     let enable_weather_tool = std::env::var("ENABLE_MOCK_GET_WEATHER")
         .ok()
@@ -65,7 +107,10 @@ async fn main() {
     };
 
     let state = LlmApiState {
-        registry: Arc::new(registry),
+        providers: Arc::new(providers),
+        agent_providers: Arc::new(agent_providers),
+        model_api: Arc::new(model_api),
+        route_strategy,
         tool_mgr,
         tool_invoker,
         metadata_mgr: Arc::new(MetadataBuilder::default())

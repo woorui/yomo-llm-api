@@ -1,6 +1,7 @@
 pub mod agent_loop;
 pub mod metadata;
 pub mod config;
+pub mod endpoint;
 pub mod llm_api;
 pub mod tool_invoker;
 pub mod mock_get_weather;

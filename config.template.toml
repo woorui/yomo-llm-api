@@ -1,9 +1,68 @@
 [[providers]]
-id = "azure"
+id = "openai-primary"
 type = "openai"
-model = "gpt-5.4-mini"
-default = true
 
 [providers.params]
-api_key = "<YOUR_API_KEY>"
-base_url = "https://<YOUR_RESOURCE>.openai.azure.com/openai/v1"
+api_key = "<OPENAI_API_KEY>"
+base_url = "https://api.openai.com"
+
+[[providers]]
+id = "anthropic-main"
+type = "anthropic"
+
+[providers.params]
+api_key = "<ANTHROPIC_API_KEY>"
+base_url = "https://api.anthropic.com"
+
+[[providers]]
+id = "cohere-main"
+type = "cohere"
+
+[providers.params]
+api_key = "<COHERE_API_KEY>"
+base_url = "https://api.cohere.com"
+
+[endpoint.messages]
+routes = [
+  { model_id = "claude-sonnet-4-6", model = "claude-sonnet-4-6", provider_id = "anthropic-main", default = true }
+]
+
+[endpoint.responses]
+routes = [
+  { model_id = "gpt-5.1", model = "gpt-5.1", provider_id = "openai-primary", default = true }
+]
+
+[endpoint.chat_completions]
+routes = [
+  { model_id = "gpt-4.1", model = "gpt-4.1", provider_id = "openai-primary", default = true }
+]
+
+[endpoint.embeddings]
+routes = [
+  { model_id = "text-embedding-3-large", model = "text-embedding-3-large", provider_id = "openai-primary", default = true }
+]
+
+[endpoint.rerank]
+routes = [
+  { model_id = "rerank-v4.0-pro", model = "rerank-v4.0-pro", provider_id = "cohere-main", default = true }
+]
+
+[endpoint.audio_speech]
+routes = [
+  { model_id = "gpt-4o-mini-tts", model = "gpt-4o-mini-tts", provider_id = "openai-primary", default = true }
+]
+
+[endpoint.audio_transcriptions]
+routes = [
+  { model_id = "gpt-4o-mini-transcribe", model = "gpt-4o-mini-transcribe", provider_id = "openai-primary", default = true }
+]
+
+[endpoint.images_generations]
+routes = [
+  { model_id = "gpt-image-1", model = "gpt-image-1", provider_id = "openai-primary", default = true }
+]
+
+[endpoint.images_edits]
+routes = [
+  { model_id = "gpt-image-1-edit", model = "gpt-image-1-edit", provider_id = "openai-primary", default = true }
+]

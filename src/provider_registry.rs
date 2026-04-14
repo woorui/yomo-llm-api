@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::config::ConfigError;
+use crate::config::EndpointRouteSet;
+use crate::endpoint::Endpoint;
 use crate::provider::Provider;
 use crate::providers::openai::build_openai_provider;
 
@@ -19,39 +21,86 @@ pub struct ProviderEntry {
 pub struct ProviderRegistry<M> {
     providers: HashMap<ProviderId, ProviderEntry>,
     strategy: Arc<dyn SelectionStrategy<M>>,
-    default_provider_id: ProviderId,
+}
+
+#[derive(Clone, Debug)]
+pub struct SelectedRoute {
+    pub model_id: String,
+    pub model: String,
+    pub provider_id: String,
+}
+
+#[derive(Debug)]
+pub enum RouteSelectionError {
+    EndpointNotConfigured,
+    ModelNotConfigured,
+    ModelAmbiguous,
 }
 
 pub trait SelectionStrategy<M>: Send + Sync {
     fn select(
         &self,
-        model: &str,
+        endpoint: Endpoint,
+        model_id: Option<&str>,
         metadata: &M,
-        registry: &ProviderRegistry<M>,
-    ) -> Result<String, anyhow::Error>;
+    ) -> Result<SelectedRoute, RouteSelectionError>;
 }
 
-#[derive(Default)]
-pub struct ByModel;
+#[derive(Clone)]
+pub struct ByModel {
+    routes: HashMap<Endpoint, EndpointRouteSet>,
+}
+
+impl ByModel {
+    pub fn new(routes: HashMap<Endpoint, EndpointRouteSet>) -> Self {
+        Self { routes }
+    }
+}
 
 impl<M> SelectionStrategy<M> for ByModel {
     fn select(
         &self,
-        model: &str,
+        endpoint: Endpoint,
+        model_id: Option<&str>,
         _metadata: &M,
-        registry: &ProviderRegistry<M>,
-    ) -> Result<String, anyhow::Error> {
-        if model.trim().is_empty() {
-            return Err(anyhow::anyhow!("model is required"));
-        }
+    ) -> Result<SelectedRoute, RouteSelectionError> {
+        let Some(routes) = self.routes.get(&endpoint) else {
+            return Err(RouteSelectionError::EndpointNotConfigured);
+        };
 
-        for entry in registry.providers().values() {
-            if entry.model == model {
-                return Ok(entry.id.clone());
+        if let Some(model_id) = model_id {
+            if let Some(route) = routes
+                .routes
+                .iter()
+                .find(|route| route.model_id.eq_ignore_ascii_case(model_id))
+            {
+                return Ok(SelectedRoute {
+                    model_id: route.model_id.clone(),
+                    model: route.model.clone(),
+                    provider_id: route.provider_id.clone(),
+                });
             }
+            return Err(RouteSelectionError::ModelNotConfigured);
         }
 
-        Err(anyhow::anyhow!("unsupported model {model}"))
+        if routes.routes.len() == 1 {
+            let route = &routes.routes[0];
+            return Ok(SelectedRoute {
+                model_id: route.model_id.clone(),
+                model: route.model.clone(),
+                provider_id: route.provider_id.clone(),
+            });
+        }
+
+        if let Some(route) = routes.routes.iter().find(|route| route.default) {
+            return Ok(SelectedRoute {
+                model_id: route.model_id.clone(),
+                model: route.model.clone(),
+                provider_id: route.provider_id.clone(),
+            });
+        }
+
+        Err(RouteSelectionError::ModelAmbiguous)
     }
 }
 
@@ -65,13 +114,9 @@ impl<M> ProviderRegistry<M> {
         config.validate()?;
 
         let mut providers: HashMap<ProviderId, ProviderEntry> = HashMap::new();
-        let mut default_provider_id: Option<ProviderId> = None;
         for item in &config.providers {
-            if item.default {
-                default_provider_id = Some(item.id.clone());
-            }
             let provider = match item.provider_type.as_str() {
-                "openai" => build_openai_provider(item.model.clone(), &item.params)?,
+                "openai" => build_openai_provider(&item.params)?,
                 other => return Err(ConfigError::UnknownProviderType(other.to_string())),
             };
 
@@ -84,35 +129,32 @@ impl<M> ProviderRegistry<M> {
             providers.insert(item.id.clone(), entry);
         }
 
-        let default_provider_id = default_provider_id.ok_or_else(|| {
-            ConfigError::InvalidProvider("default provider is missing".to_string())
-        })?;
-
-        Ok(Self::new(providers, strategy, default_provider_id))
+        Ok(Self::new(providers, strategy))
     }
 
     pub fn new(
         providers: HashMap<ProviderId, ProviderEntry>,
         strategy: Arc<dyn SelectionStrategy<M>>,
-        default_provider_id: ProviderId,
     ) -> Self {
         Self {
             providers,
             strategy,
-            default_provider_id,
         }
     }
 
-    pub fn select(&self, model: &str, metadata: &M) -> Result<&ProviderEntry, anyhow::Error> {
-        let selected = self.strategy.select(model, metadata, self).ok();
-        let id = selected
-            .as_ref()
-            .and_then(|id| self.providers.get_key_value(id).map(|(key, _)| key))
-            .unwrap_or(&self.default_provider_id);
-
+    pub fn select(
+        &self,
+        endpoint: Endpoint,
+        model_id: Option<&str>,
+        metadata: &M,
+    ) -> Result<&ProviderEntry, anyhow::Error> {
+        let selected = self
+            .strategy
+            .select(endpoint, model_id, metadata)
+            .map_err(|err| anyhow::anyhow!("route selection failed: {err:?}"))?;
         self.providers
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("unsupported model {model}"))
+            .get(&selected.provider_id)
+            .ok_or_else(|| anyhow::anyhow!("unsupported provider {}", selected.provider_id))
     }
 
     pub fn providers(&self) -> &HashMap<ProviderId, ProviderEntry> {

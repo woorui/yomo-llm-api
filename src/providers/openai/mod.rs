@@ -14,21 +14,17 @@ pub mod mapper;
 #[derive(Clone)]
 pub struct OpenAIProvider {
     client: openai_client::Client,
-    model: String,
 }
 
 impl OpenAIProvider {
-    pub fn new(client: openai_client::Client, model: impl Into<String>) -> Self {
-        Self {
-            client,
-            model: model.into(),
-        }
+    pub fn new(client: openai_client::Client) -> Self {
+        Self { client }
     }
 }
 
 impl Provider for OpenAIProvider {
     fn model(&self) -> &str {
-        &self.model
+        "openai"
     }
 
     fn complete<'a>(
@@ -38,7 +34,6 @@ impl Provider for OpenAIProvider {
     {
         Box::pin(async move {
             validate_request(&request)?;
-            ensure_model_matches(&self.model, &request.model)?;
             let response = self
                 .client
                 .chat_completions(request)
@@ -55,7 +50,6 @@ impl Provider for OpenAIProvider {
     ) -> Pin<Box<dyn Stream<Item = Result<UnifiedEvent, AgentError>> + Send + 'a>> {
         Box::pin(try_stream! {
             validate_request(&request)?;
-            ensure_model_matches(&self.model, &request.model)?;
             let stream = self
                 .client
                 .chat_completions_stream(request)
@@ -75,7 +69,6 @@ impl Provider for OpenAIProvider {
 }
 
 pub fn build_openai_provider(
-    model: String,
     params: &std::collections::HashMap<String, String>,
 ) -> Result<OpenAIProvider, ConfigError> {
     let api_key = params
@@ -87,19 +80,10 @@ pub fn build_openai_provider(
     }
     let client = openai_client::Client::new(config)
         .map_err(|err| ConfigError::InvalidProvider(err.to_string()))?;
-    Ok(OpenAIProvider::new(client, model))
+    Ok(OpenAIProvider::new(client))
 }
 
 fn validate_request(request: &ChatCompletionRequest) -> Result<(), AgentError> {
     validate_openai_request(request)
         .map_err(|message| AgentError::InvalidRequest(message))
-}
-
-fn ensure_model_matches(model: &str, request_model: &str) -> Result<(), AgentError> {
-    if model != request_model {
-        return Err(AgentError::InvalidRequest(format!(
-            "request model {request_model} does not match provider model {model}"
-        )));
-    }
-    Ok(())
 }

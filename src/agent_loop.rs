@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::fmt;
 use std::pin::Pin;
 
@@ -20,7 +21,6 @@ use crate::provider::{
     AgentError, Provider, ToolCall as ProviderToolCall, UnifiedEvent, UnifiedResponse, Usage,
 };
 use crate::providers::openai::mapper::ensure_tool_call_id;
-use yomo::tool_mgr::ToolMgr;
 
 pub struct AgentLoopConfig {
     pub max_calls: usize,
@@ -53,7 +53,7 @@ struct ToolMaps {
 pub async fn run_agent_loop<A, M>(
     provider: std::sync::Arc<dyn Provider>,
     request: ChatCompletionRequest,
-    tool_mgr: std::sync::Arc<dyn ToolMgr<A, M>>,
+    server_tools: HashMap<String, String>,
     invoker: std::sync::Arc<dyn ToolInvoker<M>>,
     metadata: M,
     trace_id: String,
@@ -65,12 +65,13 @@ where
     A: Send + Sync + 'static,
     M: fmt::Display + Send + Sync + 'static,
 {
+    let server_tools = std::sync::Arc::new(server_tools);
     let metadata = std::sync::Arc::new(metadata);
     if request.stream.unwrap_or(false) {
-        run_agent_loop_stream(
+        run_agent_loop_stream::<A, M>(
             provider,
             request,
-            tool_mgr,
+            Arc::clone(&server_tools),
             invoker,
             metadata,
             trace_id,
@@ -80,10 +81,10 @@ where
         )
         .await
     } else {
-        run_agent_loop_nonstream(
+        run_agent_loop_nonstream::<A, M>(
             provider,
             request,
-            tool_mgr,
+            Arc::clone(&server_tools),
             invoker,
             metadata,
             trace_id,
@@ -98,7 +99,7 @@ where
 async fn run_agent_loop_nonstream<A, M>(
     provider: std::sync::Arc<dyn Provider>,
     mut request: ChatCompletionRequest,
-    tool_mgr: std::sync::Arc<dyn ToolMgr<A, M>>,
+    server_tools: std::sync::Arc<HashMap<String, String>>,
     invoker: std::sync::Arc<dyn ToolInvoker<M>>,
     metadata: std::sync::Arc<M>,
     trace_id: String,
@@ -119,7 +120,7 @@ where
         reasoning_tokens: None,
     };
     loop {
-        let tool_maps = build_tool_maps(&request, tool_mgr.as_ref(), metadata.as_ref()).await?;
+        let tool_maps = build_tool_maps(&request, server_tools.as_ref())?;
         request.tools = tool_maps.merged_tools.clone();
         if call_count > 0 {
             request.tool_choice = None;
@@ -209,7 +210,7 @@ where
 async fn run_agent_loop_stream<A, M>(
     provider: std::sync::Arc<dyn Provider>,
     mut request: ChatCompletionRequest,
-    tool_mgr: std::sync::Arc<dyn ToolMgr<A, M>>,
+    server_tools: std::sync::Arc<HashMap<String, String>>,
     invoker: std::sync::Arc<dyn ToolInvoker<M>>,
     metadata: std::sync::Arc<M>,
     trace_id: String,
@@ -231,10 +232,10 @@ where
             reasoning_tokens: None,
         };
         loop {
-            let tool_maps = build_tool_maps(&request, tool_mgr.as_ref(), metadata.as_ref()).await?;
-            request.tools = tool_maps.merged_tools.clone();
-            if call_count > 0 {
-                request.tool_choice = None;
+        let tool_maps = build_tool_maps(&request, server_tools.as_ref())?;
+        request.tools = tool_maps.merged_tools.clone();
+        if call_count > 0 {
+            request.tool_choice = None;
             }
 
             let llm_span = info_span!(
@@ -478,19 +479,10 @@ where
     })
 }
 
-async fn build_tool_maps<A, M>(
+fn build_tool_maps(
     request: &ChatCompletionRequest,
-    tool_mgr: &dyn ToolMgr<A, M>,
-    metadata: &M,
-) -> Result<ToolMaps, AgentError>
-where
-    A: Send + Sync + 'static,
-    M: Send + Sync,
-{
-    let server_tools = tool_mgr
-        .list_tools(metadata)
-        .await
-        .map_err(|err| AgentError::ProviderErr(format!("tool manager error: {err}")))?;
+    server_tools: &HashMap<String, String>,
+) -> Result<ToolMaps, AgentError> {
     let server_tools = server_tools
         .into_iter()
         .filter_map(|(name, schema)| parse_tool_schema(&name, &schema))
