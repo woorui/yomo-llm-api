@@ -10,3 +10,4 @@ pub mod openai_types;
 pub mod provider;
 pub mod provider_registry;
 pub mod providers;
+pub mod model_api;
