@@ -89,7 +89,7 @@ impl ModelApi {
             http.status_code = field::Empty,
             model = field::Empty,
             usage = field::Empty,
-            error_message = field::Empty,
+            error_response = field::Empty,
         );
         let _guard = span.enter();
 
@@ -98,7 +98,7 @@ impl ModelApi {
             Err(err) => {
                 error!(path = req_path, "read request body failed: {err}");
                 span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
-                span.record("error_message", "failed to read request body");
+                span.record("error_response", "failed to read request body");
                 return error_response(StatusCode::BAD_REQUEST, "failed to read request body");
             }
         };
@@ -110,7 +110,7 @@ impl ModelApi {
                     .unwrap_or_default();
                 let message = format!("model {model} is not supported");
                 span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
-                span.record("error_message", message.as_str());
+                span.record("error_response", message.as_str());
                 return error_response(StatusCode::BAD_REQUEST, &message);
             }
         };
@@ -126,12 +126,12 @@ impl ModelApi {
                 let model = request_model_id.clone().unwrap_or_default();
                 let message = format!("model {model} is not supported");
                 span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
-                span.record("error_message", message.as_str());
+                span.record("error_response", message.as_str());
                 return error_response(StatusCode::BAD_REQUEST, &message);
             }
             Err(SelectionError::ModelNotConfigured) => {
                 span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
-                span.record("error_message", "model not configured for endpoint");
+                span.record("error_response", "model not configured for endpoint");
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "model not configured for endpoint",
@@ -140,7 +140,7 @@ impl ModelApi {
             Err(SelectionError::ModelAmbiguous) => {
                 span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
                 span.record(
-                    "error_message",
+                    "error_response",
                     "multiple configs match endpoint; include model or add default",
                 );
                 return error_response(
@@ -157,7 +157,7 @@ impl ModelApi {
             Some(binding) => binding,
             None => {
                 span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
-                span.record("error_message", "model not configured for endpoint");
+                span.record("error_response", "model not configured for endpoint");
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "model not configured for endpoint",
@@ -190,8 +190,8 @@ impl ModelApi {
                     "upstream request failed: {err}"
                 );
                 span.record("http.status_code", StatusCode::BAD_GATEWAY.as_u16() as i64);
-                span.record("error_message", "upstream request failed");
-                return error_response(StatusCode::BAD_GATEWAY, "upstream request failed");
+                span.record("error_response", "upstream error");
+                return error_response(StatusCode::BAD_GATEWAY, "upstream error");
             }
         };
 
@@ -222,10 +222,10 @@ impl ModelApi {
             span.record("http.status_code", status.as_u16() as i64);
             return builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
                 span.record("http.status_code", StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64);
-                span.record("error_message", "failed to build response");
+                span.record("error_response", "internal error");
                 error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to build response",
+                    "internal error",
                 )
             });
         }
@@ -238,8 +238,8 @@ impl ModelApi {
                     "read upstream body failed: {err}"
                 );
                 span.record("http.status_code", StatusCode::BAD_GATEWAY.as_u16() as i64);
-                span.record("error_message", "failed to read upstream body");
-                return error_response(StatusCode::BAD_GATEWAY, "failed to read upstream body");
+                span.record("error_response", "upstream error");
+                return error_response(StatusCode::BAD_GATEWAY, "upstream error");
             }
         };
 
@@ -256,10 +256,10 @@ impl ModelApi {
 
         builder.body(Body::from(response_body)).unwrap_or_else(|_| {
             span.record("http.status_code", StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64);
-            span.record("error_message", "failed to build response");
+            span.record("error_response", "internal error");
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to build response",
+                "internal error",
             )
         })
     }
