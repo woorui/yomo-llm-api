@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Span, field};
 
 use crate::config::ProviderConfig;
 use crate::endpoint::Endpoint;
@@ -82,11 +82,23 @@ impl ModelApi {
         let req_path = req.uri().path().to_string();
         let method = req.method().clone();
         let incoming_headers = req.headers().clone();
+        let span = tracing::info_span!(
+            "http.request",
+            http.method = %method,
+            http.route = %req_path,
+            http.status_code = field::Empty,
+            model = field::Empty,
+            usage = field::Empty,
+            error_message = field::Empty,
+        );
+        let _guard = span.enter();
 
         let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
             Ok(b) => b,
             Err(err) => {
                 error!(path = req_path, "read request body failed: {err}");
+                span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
+                span.record("error_message", "failed to read request body");
                 return error_response(StatusCode::BAD_REQUEST, "failed to read request body");
             }
         };
@@ -97,6 +109,8 @@ impl ModelApi {
                 let model = extract_model_from_request(&incoming_headers, &body)
                     .unwrap_or_default();
                 let message = format!("model {model} is not supported");
+                span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
+                span.record("error_message", message.as_str());
                 return error_response(StatusCode::BAD_REQUEST, &message);
             }
         };
@@ -111,24 +125,39 @@ impl ModelApi {
             Err(SelectionError::EndpointNotConfigured) => {
                 let model = request_model_id.clone().unwrap_or_default();
                 let message = format!("model {model} is not supported");
+                span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
+                span.record("error_message", message.as_str());
                 return error_response(StatusCode::BAD_REQUEST, &message);
             }
             Err(SelectionError::ModelNotConfigured) => {
+                span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
+                span.record("error_message", "model not configured for endpoint");
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "model not configured for endpoint",
                 );
             }
             Err(SelectionError::ModelAmbiguous) => {
+                span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
+                span.record(
+                    "error_message",
+                    "multiple configs match endpoint; include model or add default",
+                );
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "multiple configs match endpoint; include model or add default",
                 );
             }
         };
+        span.record(
+            "model",
+            field::display(request_model_id.as_deref().unwrap_or(&selection.model_id)),
+        );
         let binding = match self.binding_for_selection(endpoint, &selection) {
             Some(binding) => binding,
             None => {
+                span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
+                span.record("error_message", "model not configured for endpoint");
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "model not configured for endpoint",
@@ -160,6 +189,8 @@ impl ModelApi {
                     path = binding.endpoint.path(),
                     "upstream request failed: {err}"
                 );
+                span.record("http.status_code", StatusCode::BAD_GATEWAY.as_u16() as i64);
+                span.record("error_message", "upstream request failed");
                 return error_response(StatusCode::BAD_GATEWAY, "upstream request failed");
             }
         };
@@ -186,8 +217,12 @@ impl ModelApi {
                 status,
                 request_model_id.clone(),
                 Arc::clone(&self.usage_handler),
+                span.clone(),
             );
+            span.record("http.status_code", status.as_u16() as i64);
             return builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
+                span.record("http.status_code", StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64);
+                span.record("error_message", "failed to build response");
                 error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "failed to build response",
@@ -202,11 +237,14 @@ impl ModelApi {
                     path = binding.endpoint.path(),
                     "read upstream body failed: {err}"
                 );
+                span.record("http.status_code", StatusCode::BAD_GATEWAY.as_u16() as i64);
+                span.record("error_message", "failed to read upstream body");
                 return error_response(StatusCode::BAD_GATEWAY, "failed to read upstream body");
             }
         };
 
         let usage = extract_usage(binding.endpoint, &content_type, &response_body);
+        record_usage_on_span(&span, &usage);
         dispatch_usage(
             Arc::clone(&self.usage_handler),
             binding.endpoint,
@@ -214,8 +252,11 @@ impl ModelApi {
             request_model_id.clone(),
             usage,
         );
+        span.record("http.status_code", status.as_u16() as i64);
 
         builder.body(Body::from(response_body)).unwrap_or_else(|_| {
+            span.record("http.status_code", StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64);
+            span.record("error_message", "failed to build response");
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to build response",
@@ -535,6 +576,7 @@ fn stream_sse_response(
     status: reqwest::StatusCode,
     request_model: Option<String>,
     usage_handler: Arc<dyn UsageHandler + Send + Sync>,
+    span: Span,
 ) -> impl futures_util::Stream<Item = Result<Bytes, io::Error>> {
     let mut stream = upstream.bytes_stream();
     let mut tracker = SseUsageAccumulator::new(endpoint, status, request_model, usage_handler);
@@ -554,7 +596,8 @@ fn stream_sse_response(
             }
         }
         let usage = tracker.latest_usage.take();
-        tracker.log(usage);
+        tracker.log(usage.clone());
+        record_usage_on_span(&span, &usage);
     }
 }
 
@@ -575,6 +618,15 @@ fn dispatch_usage(
     tokio::spawn(async move {
         handler.handle(endpoint, status, request_model, usage);
     });
+}
+
+fn record_usage_on_span(span: &Span, usage: &Option<Usage>) {
+    let Some(usage) = usage else {
+        return;
+    };
+    if let Ok(value) = serde_json::to_string(usage) {
+        span.record("usage", &value.as_str());
+    }
 }
 
 struct SseUsageAccumulator {
