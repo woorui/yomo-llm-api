@@ -436,8 +436,8 @@ fn map_finish_reason_string(reason: &FinishReason) -> String {
 
 fn map_usage_to_openai(usage: &crate::provider::Usage) -> Usage {
     Usage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
+        prompt_tokens: usage.input_tokens,
+        completion_tokens: usage.output_tokens,
         total_tokens: usage.total_tokens,
         cached_tokens: usage.cached_tokens,
         reasoning_tokens: usage.reasoning_tokens,
@@ -481,8 +481,8 @@ fn map_finish_reason(reason: &str) -> String {
 
 fn map_usage(usage: &crate::provider::Usage) -> Usage {
     Usage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
+        prompt_tokens: usage.input_tokens,
+        completion_tokens: usage.output_tokens,
         total_tokens: usage.total_tokens,
         cached_tokens: usage.cached_tokens,
         reasoning_tokens: usage.reasoning_tokens,

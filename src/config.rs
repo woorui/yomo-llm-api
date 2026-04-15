@@ -29,8 +29,6 @@ impl Error for ConfigError {}
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub providers: Vec<ProviderConfig>,
-    #[serde(default)]
-    pub endpoint: HashMap<String, EndpointRouteSet>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -38,26 +36,13 @@ pub struct ProviderConfig {
     pub id: String,
     #[serde(rename = "type")]
     pub provider_type: String,
-    #[serde(default)]
-    pub model: String,
+    pub model_id: String,
     #[serde(default)]
     pub default: bool,
+    #[serde(default)]
+    pub endpoints: Vec<String>,
     #[serde(default)]
     pub params: HashMap<String, String>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct EndpointRouteSet {
-    pub routes: Vec<EndpointRoute>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct EndpointRoute {
-    pub model_id: String,
-    pub model: String,
-    pub provider_id: String,
-    #[serde(default)]
-    pub default: bool,
 }
 
 impl Config {
@@ -81,6 +66,9 @@ impl Config {
         }
 
         let mut ids = std::collections::HashSet::new();
+        let mut model_ids = HashSet::new();
+        let mut endpoint_defaults: HashMap<String, String> = HashMap::new();
+        let mut endpoint_counts: HashMap<String, usize> = HashMap::new();
         for provider in &self.providers {
             if provider.id.trim().is_empty() {
                 return Err(ConfigError::InvalidProvider("id is required".to_string()));
@@ -97,94 +85,52 @@ impl Config {
                     provider.id
                 )));
             }
-        }
-
-        self.validate_endpoint_routes()?;
-
-        Ok(())
-    }
-
-    pub fn endpoint_map(&self) -> Result<HashMap<Endpoint, EndpointRouteSet>, ConfigError> {
-        let mut map = HashMap::new();
-        for (key, routes) in &self.endpoint {
-            let endpoint = Endpoint::from_key(key).ok_or_else(|| {
-                ConfigError::InvalidProvider(format!("unknown endpoint key: {key}"))
-            })?;
-            map.insert(endpoint, routes.clone());
-        }
-        Ok(map)
-    }
-
-    fn validate_endpoint_routes(&self) -> Result<(), ConfigError> {
-        let mut models: HashMap<String, String> = HashMap::new();
-
-        for (key, routes) in &self.endpoint {
-            if Endpoint::from_key(key).is_none() {
+            if provider.model_id.trim().is_empty() {
                 return Err(ConfigError::InvalidProvider(format!(
-                    "unknown endpoint key: {key}"
+                    "model_id is required for {}",
+                    provider.id
                 )));
             }
-            if routes.routes.is_empty() {
+            let normalized_model_id = provider.model_id.to_ascii_lowercase();
+            if !model_ids.insert(normalized_model_id) {
                 return Err(ConfigError::InvalidProvider(format!(
-                    "endpoint {key} routes is empty"
+                    "duplicate model_id: {}",
+                    provider.model_id
                 )));
             }
-            let mut model_ids = HashSet::new();
-            let mut default_count = 0;
-            for route in &routes.routes {
-                if route.model_id.trim().is_empty() {
+            if provider.endpoints.is_empty() {
+                return Err(ConfigError::InvalidProvider(format!(
+                    "endpoints is required for {}",
+                    provider.id
+                )));
+            }
+            for endpoint in &provider.endpoints {
+                if Endpoint::from_key(endpoint).is_none() {
                     return Err(ConfigError::InvalidProvider(format!(
-                        "endpoint {key} model_id is required"
+                        "unknown endpoint key: {endpoint}"
                     )));
                 }
-                if route.model.trim().is_empty() {
-                    return Err(ConfigError::InvalidProvider(format!(
-                        "endpoint {key} model is required"
-                    )));
-                }
-                if route.provider_id.trim().is_empty() {
-                    return Err(ConfigError::InvalidProvider(format!(
-                        "endpoint {key} provider_id is required"
-                    )));
-                }
-                let normalized_model_id = route.model_id.to_ascii_lowercase();
-                if !model_ids.insert(normalized_model_id.clone()) {
-                    return Err(ConfigError::InvalidProvider(format!(
-                        "endpoint {key} duplicate model_id: {}",
-                        route.model_id
-                    )));
-                }
-                let normalized_model = route.model.to_ascii_lowercase();
-                if let Some(existing) = models.get(&normalized_model) {
-                    if existing != &normalized_model_id {
+                *endpoint_counts.entry(endpoint.clone()).or_insert(0) += 1;
+                if provider.default {
+                    if let Some(existing) = endpoint_defaults.get(endpoint) {
                         return Err(ConfigError::InvalidProvider(format!(
-                            "model {} is mapped by multiple model_id",
-                            route.model
+                            "endpoint {endpoint} has multiple default providers: {existing}, {}",
+                            provider.id
                         )));
                     }
-                } else {
-                    models.insert(normalized_model, normalized_model_id.clone());
-                }
-                if route.default {
-                    default_count += 1;
-                }
-                if !self
-                    .providers
-                    .iter()
-                    .any(|provider| provider.id == route.provider_id)
-                {
-                    return Err(ConfigError::InvalidProvider(format!(
-                        "endpoint {key} references unknown provider_id {}",
-                        route.provider_id
-                    )));
+                    endpoint_defaults.insert(endpoint.clone(), provider.id.clone());
                 }
             }
-            if routes.routes.len() > 1 && default_count != 1 {
+        }
+
+        for (endpoint, count) in endpoint_counts {
+            if count > 1 && !endpoint_defaults.contains_key(&endpoint) {
                 return Err(ConfigError::InvalidProvider(format!(
-                    "endpoint {key} must have exactly one default route"
+                    "endpoint {endpoint} must have a default provider"
                 )));
             }
         }
+
         Ok(())
     }
 }

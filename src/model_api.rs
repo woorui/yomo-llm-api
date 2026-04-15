@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{error, info, warn};
 
-use crate::config::{EndpointRouteSet, ProviderConfig};
+use crate::config::ProviderConfig;
 use crate::endpoint::Endpoint;
-use crate::provider_registry::{ByModel, RouteSelectionError, SelectedRoute, SelectionStrategy};
+use crate::provider_registry::{ByModel, SelectionError, SelectionResult, SelectionStrategy};
 
 pub const SUPPORTED_ENDPOINT_PATHS: [&str; 9] = crate::endpoint::SUPPORTED_ENDPOINT_PATHS;
 
@@ -23,9 +23,9 @@ const MODEL_API_TIMEOUT_SECS: u64 = 300;
 #[derive(Clone)]
 pub struct ModelApi {
     client: Client,
-    routes: HashMap<Endpoint, Vec<EndpointBinding>>,
+    bindings_by_endpoint: HashMap<Endpoint, Vec<EndpointBinding>>,
     usage_handler: Arc<dyn UsageHandler + Send + Sync>,
-    route_strategy: Arc<dyn SelectionStrategy<()>>,
+    selection_strategy: Arc<dyn SelectionStrategy<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -34,12 +34,10 @@ struct EndpointBinding {
     target_url: String,
     api_key: Option<String>,
     model_id: String,
-    model: String,
 }
 
 impl ModelApi {
     pub fn new(
-        endpoints: HashMap<Endpoint, EndpointRouteSet>,
         providers: &HashMap<String, ProviderConfig>,
     ) -> Result<Self, String> {
         let client = Client::builder()
@@ -47,38 +45,36 @@ impl ModelApi {
             .build()
             .map_err(|e| format!("build reqwest client failed: {e}"))?;
 
-        let mut routes: HashMap<Endpoint, Vec<EndpointBinding>> = HashMap::new();
+        let mut bindings_by_endpoint: HashMap<Endpoint, Vec<EndpointBinding>> = HashMap::new();
 
-        for (endpoint, route_set) in &endpoints {
-            let bindings = routes.entry(*endpoint).or_default();
-            let endpoint_path = endpoint.path();
-            for route in &route_set.routes {
-                let provider = providers.get(&route.provider_id).ok_or_else(|| {
-                    format!("unknown provider_id {}", route.provider_id)
-                })?;
-                let base_url = provider
-                    .params
-                    .get("base_url")
-                    .ok_or_else(|| format!("provider {} missing base_url", provider.id))?;
+        for provider in providers.values() {
+            let base_url = provider
+                .params
+                .get("base_url")
+                .ok_or_else(|| format!("provider {} missing base_url", provider.id))?;
+            let api_key = provider.params.get("api_key").cloned();
+            for endpoint_key in &provider.endpoints {
+                let endpoint = Endpoint::from_key(endpoint_key)
+                    .ok_or_else(|| format!("unknown endpoint key: {endpoint_key}"))?;
+                let endpoint_path = endpoint.path();
                 let target_url = build_target_url(base_url, endpoint_path)?;
-                let api_key = provider.params.get("api_key").cloned();
+                let bindings = bindings_by_endpoint.entry(endpoint).or_default();
                 bindings.push(EndpointBinding {
-                    endpoint: *endpoint,
+                    endpoint,
                     target_url,
-                    api_key,
-                    model_id: route.model_id.clone(),
-                    model: route.model.clone(),
+                    api_key: api_key.clone(),
+                    model_id: provider.model_id.clone(),
                 });
             }
         }
 
-        let route_strategy = Arc::new(ByModel::new(endpoints));
+        let selection_strategy = Arc::new(ByModel::new(providers.clone()));
 
         Ok(Self {
             client,
-            routes,
+            bindings_by_endpoint,
             usage_handler: Arc::new(LogUsageHandler),
-            route_strategy,
+            selection_strategy,
         })
     }
 
@@ -98,34 +94,39 @@ impl ModelApi {
         let endpoint = match Endpoint::from_path(&req_path) {
             Some(endpoint) => endpoint,
             None => {
-                return error_response(StatusCode::NOT_FOUND, "endpoint not configured in file");
+                let model = extract_model_from_request(&incoming_headers, &body)
+                    .unwrap_or_default();
+                let message = format!("model {model} is not supported");
+                return error_response(StatusCode::BAD_REQUEST, &message);
             }
         };
         let request_model_id = extract_model_from_request(&incoming_headers, &body);
-        let route = match self.route_strategy.select(
+        let selection = match self.selection_strategy.select(
             endpoint,
             request_model_id.as_deref(),
             &(),
         )
         {
-            Ok(route) => route,
-            Err(RouteSelectionError::EndpointNotConfigured) => {
-                return error_response(StatusCode::NOT_FOUND, "endpoint not configured in file");
+            Ok(selection) => selection,
+            Err(SelectionError::EndpointNotConfigured) => {
+                let model = request_model_id.clone().unwrap_or_default();
+                let message = format!("model {model} is not supported");
+                return error_response(StatusCode::BAD_REQUEST, &message);
             }
-            Err(RouteSelectionError::ModelNotConfigured) => {
+            Err(SelectionError::ModelNotConfigured) => {
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "model not configured for endpoint",
                 );
             }
-            Err(RouteSelectionError::ModelAmbiguous) => {
+            Err(SelectionError::ModelAmbiguous) => {
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "multiple configs match endpoint; include model or add default",
                 );
             }
         };
-        let binding = match self.binding_for_route(endpoint, &route) {
+        let binding = match self.binding_for_selection(endpoint, &selection) {
             Some(binding) => binding,
             None => {
                 return error_response(
@@ -135,8 +136,8 @@ impl ModelApi {
             }
         };
 
-        let body = ensure_request_model(&incoming_headers, body, &binding.model);
-        let request_model_id = request_model_id.or_else(|| Some(route.model_id.clone()));
+        let body = ensure_request_model(&incoming_headers, body, &binding.model_id);
+        let request_model_id = request_model_id.or_else(|| Some(selection.model_id.clone()));
 
         let mut outbound = self
             .client
@@ -222,21 +223,25 @@ impl ModelApi {
         })
     }
 
-    fn binding_for_route(&self, endpoint: Endpoint, route: &SelectedRoute) -> Option<EndpointBinding> {
-        self.routes
+    fn binding_for_selection(
+        &self,
+        endpoint: Endpoint,
+        selection: &SelectionResult,
+    ) -> Option<EndpointBinding> {
+        self.bindings_by_endpoint
             .get(&endpoint)
             .and_then(|bindings| {
                 bindings
                     .iter()
-                    .find(|binding| binding.model_id.eq_ignore_ascii_case(&route.model_id))
+                    .find(|binding| binding.model_id.eq_ignore_ascii_case(&selection.model_id))
                     .cloned()
             })
     }
 }
 
 #[derive(Serialize)]
-struct ErrorBody<'a> {
-    error: &'a str,
+struct ErrorBody {
+    error: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1106,6 +1111,6 @@ fn find_usage_value(value: &Value) -> Option<Value> {
     }
 }
 
-fn error_response(status: StatusCode, msg: &'static str) -> Response<Body> {
-    (status, Json(ErrorBody { error: msg })).into_response()
+fn error_response(status: StatusCode, msg: impl Into<String>) -> Response<Body> {
+    (status, Json(ErrorBody { error: msg.into() })).into_response()
 }

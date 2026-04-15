@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::config::ConfigError;
-use crate::config::EndpointRouteSet;
+use crate::config::ProviderConfig;
 use crate::endpoint::Endpoint;
 use crate::provider::Provider;
 use crate::providers::openai::build_openai_provider;
@@ -14,7 +14,8 @@ pub type ProviderId = String;
 pub struct ProviderEntry {
     pub id: String,
     pub provider_type: String,
-    pub model: String,
+    pub model_id: String,
+    pub endpoints: Vec<String>,
     pub provider: Arc<dyn Provider>,
 }
 
@@ -24,14 +25,13 @@ pub struct ProviderRegistry<M> {
 }
 
 #[derive(Clone, Debug)]
-pub struct SelectedRoute {
+pub struct SelectionResult {
     pub model_id: String,
-    pub model: String,
     pub provider_id: String,
 }
 
 #[derive(Debug)]
-pub enum RouteSelectionError {
+pub enum SelectionError {
     EndpointNotConfigured,
     ModelNotConfigured,
     ModelAmbiguous,
@@ -43,17 +43,17 @@ pub trait SelectionStrategy<M>: Send + Sync {
         endpoint: Endpoint,
         model_id: Option<&str>,
         metadata: &M,
-    ) -> Result<SelectedRoute, RouteSelectionError>;
+    ) -> Result<SelectionResult, SelectionError>;
 }
 
 #[derive(Clone)]
 pub struct ByModel {
-    routes: HashMap<Endpoint, EndpointRouteSet>,
+    providers: HashMap<String, ProviderConfig>,
 }
 
 impl ByModel {
-    pub fn new(routes: HashMap<Endpoint, EndpointRouteSet>) -> Self {
-        Self { routes }
+    pub fn new(providers: HashMap<String, ProviderConfig>) -> Self {
+        Self { providers }
     }
 }
 
@@ -63,44 +63,48 @@ impl<M> SelectionStrategy<M> for ByModel {
         endpoint: Endpoint,
         model_id: Option<&str>,
         _metadata: &M,
-    ) -> Result<SelectedRoute, RouteSelectionError> {
-        let Some(routes) = self.routes.get(&endpoint) else {
-            return Err(RouteSelectionError::EndpointNotConfigured);
-        };
+    ) -> Result<SelectionResult, SelectionError> {
+        let endpoint_key = endpoint.key();
+        let mut candidates = Vec::new();
+        for provider in self.providers.values() {
+            if provider
+                .endpoints
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(endpoint_key))
+            {
+                candidates.push(provider);
+            }
+        }
+
+        if candidates.is_empty() {
+            return Err(SelectionError::EndpointNotConfigured);
+        }
 
         if let Some(model_id) = model_id {
-            if let Some(route) = routes
-                .routes
+            if let Some(provider) = candidates
                 .iter()
-                .find(|route| route.model_id.eq_ignore_ascii_case(model_id))
+                .find(|provider| provider.model_id.eq_ignore_ascii_case(model_id))
             {
-                return Ok(SelectedRoute {
-                    model_id: route.model_id.clone(),
-                    model: route.model.clone(),
-                    provider_id: route.provider_id.clone(),
+                return Ok(SelectionResult {
+                    model_id: provider.model_id.clone(),
+                    provider_id: provider.id.clone(),
                 });
             }
-            return Err(RouteSelectionError::ModelNotConfigured);
+            return Err(SelectionError::ModelNotConfigured);
         }
 
-        if routes.routes.len() == 1 {
-            let route = &routes.routes[0];
-            return Ok(SelectedRoute {
-                model_id: route.model_id.clone(),
-                model: route.model.clone(),
-                provider_id: route.provider_id.clone(),
-            });
+        let mut defaults = candidates.iter().filter(|provider| provider.default);
+        let Some(provider) = defaults.next() else {
+            return Err(SelectionError::ModelAmbiguous);
+        };
+        if defaults.next().is_some() {
+            return Err(SelectionError::ModelAmbiguous);
         }
 
-        if let Some(route) = routes.routes.iter().find(|route| route.default) {
-            return Ok(SelectedRoute {
-                model_id: route.model_id.clone(),
-                model: route.model.clone(),
-                provider_id: route.provider_id.clone(),
-            });
-        }
-
-        Err(RouteSelectionError::ModelAmbiguous)
+        Ok(SelectionResult {
+            model_id: provider.model_id.clone(),
+            provider_id: provider.id.clone(),
+        })
     }
 }
 
@@ -123,7 +127,8 @@ impl<M> ProviderRegistry<M> {
             let entry = ProviderEntry {
                 id: item.id.clone(),
                 provider_type: item.provider_type.clone(),
-                model: item.model.clone(),
+                model_id: item.model_id.clone(),
+                endpoints: item.endpoints.clone(),
                 provider: Arc::new(provider),
             };
             providers.insert(item.id.clone(), entry);
@@ -151,7 +156,7 @@ impl<M> ProviderRegistry<M> {
         let selected = self
             .strategy
             .select(endpoint, model_id, metadata)
-            .map_err(|err| anyhow::anyhow!("route selection failed: {err:?}"))?;
+            .map_err(|err| anyhow::anyhow!("selection failed: {err:?}"))?;
         self.providers
             .get(&selected.provider_id)
             .ok_or_else(|| anyhow::anyhow!("unsupported provider {}", selected.provider_id))

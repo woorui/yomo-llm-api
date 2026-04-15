@@ -47,13 +47,6 @@ async fn main() {
             return;
         }
     };
-    let endpoint_routes = match config.endpoint_map() {
-        Ok(routes) => routes,
-        Err(err) => {
-            error!("failed to load endpoint routes: {err}");
-            return;
-        }
-    };
     let providers = config
         .providers
         .into_iter()
@@ -74,14 +67,14 @@ async fn main() {
             }
         }
     }
-    let model_api = match ModelApi::new(endpoint_routes.clone(), &providers) {
+    let model_api = match ModelApi::new(&providers) {
         Ok(model_api) => model_api,
         Err(err) => {
             error!("failed to init endpoint proxy: {err}");
             return;
         }
     };
-    let route_strategy = Arc::new(ByModel::new(endpoint_routes.clone()));
+    let selection_strategy = Arc::new(ByModel::new(providers.clone()));
 
     let enable_weather_tool = std::env::var("ENABLE_MOCK_GET_WEATHER")
         .ok()
@@ -110,7 +103,7 @@ async fn main() {
         providers: Arc::new(providers),
         agent_providers: Arc::new(agent_providers),
         model_api: Arc::new(model_api),
-        route_strategy,
+        selection_strategy,
         tool_mgr,
         tool_invoker,
         metadata_mgr: Arc::new(MetadataBuilder::default())

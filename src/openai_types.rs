@@ -5,10 +5,8 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
-    #[serde(rename = "prompt_tokens", alias = "input_tokens")]
-    pub input_tokens: i32,
-    #[serde(rename = "completion_tokens", alias = "output_tokens")]
-    pub output_tokens: i32,
+    pub prompt_tokens: i32,
+    pub completion_tokens: i32,
     pub total_tokens: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<i32>,

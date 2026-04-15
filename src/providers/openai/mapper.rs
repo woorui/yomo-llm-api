@@ -179,8 +179,8 @@ impl Default for StreamMapState {
 
 pub fn map_usage_to_provider(usage: &OpenAIUsage) -> Usage {
     Usage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
+        input_tokens: usage.prompt_tokens,
+        output_tokens: usage.completion_tokens,
         total_tokens: usage.total_tokens,
         cached_tokens: usage.cached_tokens,
         reasoning_tokens: usage.reasoning_tokens,

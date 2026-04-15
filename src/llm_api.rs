@@ -32,13 +32,13 @@ use crate::provider::Provider;
 use crate::config::ProviderConfig;
 use crate::endpoint::Endpoint;
 use crate::model_api::ModelApi;
-use crate::provider_registry::{RouteSelectionError, SelectionStrategy};
+use crate::provider_registry::{SelectionError, SelectionStrategy};
 
 pub struct LlmApiState<A, M> {
     pub providers: Arc<HashMap<String, ProviderConfig>>,
     pub agent_providers: Arc<HashMap<String, Arc<dyn Provider>>>,
     pub model_api: Arc<ModelApi>,
-    pub route_strategy: Arc<dyn SelectionStrategy<M>>,
+    pub selection_strategy: Arc<dyn SelectionStrategy<M>>,
     pub tool_mgr: Arc<dyn ToolMgr<A, M>>,
     pub tool_invoker: Arc<dyn ToolInvoker<M>>,
     pub metadata_mgr: Arc<dyn MetadataMgr<A, M>>,
@@ -52,7 +52,7 @@ impl<A, M> Clone for LlmApiState<A, M> {
             providers: Arc::clone(&self.providers),
             agent_providers: Arc::clone(&self.agent_providers),
             model_api: Arc::clone(&self.model_api),
-            route_strategy: Arc::clone(&self.route_strategy),
+            selection_strategy: Arc::clone(&self.selection_strategy),
             tool_mgr: Arc::clone(&self.tool_mgr),
             tool_invoker: Arc::clone(&self.tool_invoker),
             metadata_mgr: Arc::clone(&self.metadata_mgr),
@@ -420,22 +420,24 @@ where
     } else {
         Some(request.model.clone())
     };
-    let route = match state.route_strategy.select(
+    let selection = match state.selection_strategy.select(
         Endpoint::ChatCompletions,
         request_model_id.as_deref(),
         &metadata,
     )
     {
-        Ok(route) => route,
-        Err(RouteSelectionError::EndpointNotConfigured) => {
-            root_span.record("http.status_code", StatusCode::NOT_FOUND.as_u16() as i64);
+        Ok(selection) => selection,
+        Err(SelectionError::EndpointNotConfigured) => {
+            root_span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
+            let model = request_model_id.as_deref().unwrap_or("");
+            let message = format!("model {model} is not supported");
             return Ok(openai_error_response(
-                StatusCode::NOT_FOUND,
-                "endpoint not configured in file",
+                StatusCode::BAD_REQUEST,
+                &message,
                 Some("invalid_request_error"),
             ));
         }
-        Err(RouteSelectionError::ModelNotConfigured) => {
+        Err(SelectionError::ModelNotConfigured) => {
             root_span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
             return Ok(openai_error_response(
                 StatusCode::BAD_REQUEST,
@@ -443,7 +445,7 @@ where
                 Some("invalid_request_error"),
             ));
         }
-        Err(RouteSelectionError::ModelAmbiguous) => {
+        Err(SelectionError::ModelAmbiguous) => {
             root_span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
             return Ok(openai_error_response(
                 StatusCode::BAD_REQUEST,
@@ -453,11 +455,11 @@ where
         }
     };
 
-    request.model = route.model.clone();
+    request.model = selection.model_id.clone();
     let stream = request.stream.unwrap_or(false);
     root_span.record(
         "model",
-        field::display(request_model_id.as_deref().unwrap_or(&route.model_id)),
+        field::display(request_model_id.as_deref().unwrap_or(&selection.model_id)),
     );
     root_span.record("streaming", stream);
     if stream {
@@ -477,8 +479,8 @@ where
         "chat request parsed: model_id={}, model={}, stream={} {}",
         request_model_id
             .as_deref()
-            .unwrap_or(&route.model_id),
-        route.model,
+            .unwrap_or(&selection.model_id),
+        selection.model_id,
         stream,
         metadata
     );
@@ -487,7 +489,7 @@ where
             "chat request invalid: model_id={}, error={} {}",
             request_model_id
                 .as_deref()
-                .unwrap_or(&route.model_id),
+                .unwrap_or(&selection.model_id),
             message,
             metadata
         );
@@ -499,13 +501,13 @@ where
         ));
     }
 
-    let provider = match state.agent_providers.get(&route.provider_id) {
+    let provider = match state.agent_providers.get(&selection.provider_id) {
         Some(provider) => Arc::clone(provider),
         None => {
             error!(
                 "chat selection failed: provider_id={}, model_id={} {}",
-                route.provider_id,
-                route.model_id,
+                selection.provider_id,
+                selection.model_id,
                 metadata
             );
             root_span.record("http.status_code", StatusCode::BAD_REQUEST.as_u16() as i64);
@@ -517,8 +519,8 @@ where
         }
     };
 
-    let model_for_log = route.model_id.clone();
-    let request_model = route.model.clone();
+    let model_for_log = selection.model_id.clone();
+    let request_model = selection.model_id.clone();
     let metadata_for_log = metadata.clone();
     let loop_result = run_agent_loop::<A, M>(
         provider,
